@@ -1,14 +1,14 @@
-#include "modern_cpp_project/greeter.hpp"
+#include "atlas/greeter.hpp"
 
 #include <format>
 #include <spdlog/spdlog.h>
 
-using namespace greeter;
+using namespace atlas;
 
-Greeter::Greeter(std::string _name) : name(std::move(_name)) {
+Atlas::Atlas(std::string _name) : name(std::move(_name)) {
 }
 
-std::string Greeter::greet(LanguageCode lang) const {
+std::string Atlas::greet(LanguageCode lang) const {
     spdlog::info("Greeting requested for: {}", name);
 
     switch (lang) {

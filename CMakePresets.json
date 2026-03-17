@@ -12,8 +12,8 @@
             "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-                "MODERN_CPP_PROJECT_ENABLE_TESTING": "ON",
-                "MODERN_CPP_PROJECT_ENABLE_STANDALONE": "ON"
+                "ATLAS_ENABLE_TESTING": "ON",
+                "ATLAS_ENABLE_STANDALONE": "ON"
             }
         },
         {
@@ -67,7 +67,7 @@
             "description": "Debug build with code coverage instrumentation",
             "inherits": "dev",
             "cacheVariables": {
-                "MODERN_CPP_PROJECT_ENABLE_CODE_COVERAGE": "ON"
+                "ATLAS_ENABLE_CODE_COVERAGE": "ON"
             }
         },
         {
@@ -76,7 +76,7 @@
             "description": "Debug build with -Werror",
             "inherits": "dev",
             "cacheVariables": {
-                "MODERN_CPP_PROJECT_WARNINGS_AS_ERRORS": "ON"
+                "ATLAS_WARNINGS_AS_ERRORS": "ON"
             }
         }
     ],

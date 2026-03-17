@@ -3,21 +3,21 @@
 
 #include <string>
 
-namespace greeter {
+namespace atlas {
 
-/**  Language codes to be used with the Greeter class */
+/**  Language codes to be used with the Atlas class */
 enum class LanguageCode { EN, DE, ES, FR };
 
 /**
  * @brief A class for saying hello in multiple languages
  */
-class Greeter {
+class Atlas {
   public:
     /**
      * @brief Creates a new greeter
      * @param name the name to greet
      */
-    Greeter(std::string name);
+    Atlas(std::string name);
     /**
      * @brief Creates a localized string containing the greeting
      * @param lang the language to greet in
@@ -29,5 +29,5 @@ class Greeter {
     std::string name;
 };
 
-} // namespace greeter
+} // namespace atlas
 #endif

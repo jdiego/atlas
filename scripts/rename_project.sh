@@ -20,8 +20,8 @@ NEW_NAME="$1"
 NEW_NAME_LOWER=$(echo "$NEW_NAME" | tr '[:upper:]' '[:lower:]')
 NEW_NAME_UPPER=$(echo "$NEW_NAME_LOWER" | tr '[:lower:]' '[:upper:]')
 
-OLD_PROJECT="modern_cpp_project"
-OLD_PROJECT_UPPER="MODERN_CPP_PROJECT"
+OLD_PROJECT="atlas"
+OLD_PROJECT_UPPER="ATLAS"
 OLD_CLASS="Greeter"
 OLD_NS="greeter"
 NEW_CLASS="$NEW_NAME"

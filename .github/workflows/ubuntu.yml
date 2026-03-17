@@ -10,7 +10,7 @@ env:
   INSTALL_LOCATION: ${{ github.workspace }}/.local
   BUILD_TYPE: Release
   CTEST_OUTPUT_ON_FAILURE: 1
-  PROJECT_NAME: MODERN_CPP_PROJECT
+  PROJECT_NAME: ATLAS
   CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
 
 jobs:

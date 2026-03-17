@@ -34,7 +34,7 @@ A C++23 project template with modern CMake (3.25+), reproducible dependency mana
 
 ```
 .
-├── include/modern_cpp_project/   # Public headers (installed via FILE_SET)
+├── include/atlas/   # Public headers (installed via FILE_SET)
 │   └── greeter.hpp
 ├── src/                          # Library implementation
 │   └── greeter.cpp
@@ -98,8 +98,8 @@ Each preset writes its build artifacts to `build/<preset-name>/`.
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  -DMODERN_CPP_PROJECT_ENABLE_TESTING=ON \
-  -DMODERN_CPP_PROJECT_ENABLE_STANDALONE=ON
+  -DATLAS_ENABLE_TESTING=ON \
+  -DATLAS_ENABLE_STANDALONE=ON
 
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -112,14 +112,14 @@ ctest --test-dir build --output-on-failure
 When this project is consumed via `add_subdirectory` or CPM, only the library is built (no tests, no standalone):
 
 ```bash
-cmake -B build -DMODERN_CPP_PROJECT_ENABLE_TESTING=OFF -DMODERN_CPP_PROJECT_ENABLE_STANDALONE=OFF
+cmake -B build -DATLAS_ENABLE_TESTING=OFF -DATLAS_ENABLE_STANDALONE=OFF
 ```
 
 Or via CPM in a consumer project:
 
 ```cmake
 CPMAddPackage("gh:your-org/modern-cpp-template@1.0.0")
-target_link_libraries(my_target PRIVATE modern_cpp_project::modern_cpp_project)
+target_link_libraries(my_target PRIVATE atlas::atlas)
 ```
 
 ---
@@ -178,8 +178,8 @@ cmake --build --preset release --target install
 After install, downstream projects can use:
 
 ```cmake
-find_package(modern_cpp_project REQUIRED)
-target_link_libraries(my_app PRIVATE modern_cpp_project::modern_cpp_project)
+find_package(atlas REQUIRED)
+target_link_libraries(my_app PRIVATE atlas::atlas)
 ```
 
 ---
@@ -200,15 +200,15 @@ This replaces all occurrences of `Greeter`/`greeter` with `MyProject`/`myproject
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `MODERN_CPP_PROJECT_ENABLE_TESTING` | `ON` | Build unit tests |
-| `MODERN_CPP_PROJECT_ENABLE_STANDALONE` | `ON` | Build standalone binary |
-| `MODERN_CPP_PROJECT_BUILD_SHARED_LIBS` | `ON` | Build shared library (OFF = static) |
-| `MODERN_CPP_PROJECT_BUILD_HEADERS_ONLY` | `OFF` | Header-only library mode |
-| `MODERN_CPP_PROJECT_WARNINGS_AS_ERRORS` | `OFF` | Treat compiler warnings as errors |
-| `MODERN_CPP_PROJECT_ENABLE_CLANG_TIDY` | `OFF` | Enable clang-tidy static analysis |
-| `MODERN_CPP_PROJECT_ENABLE_CPPCHECK` | `OFF` | Enable cppcheck static analysis |
-| `MODERN_CPP_PROJECT_ENABLE_CCACHE` | `OFF` | Enable ccache for faster rebuilds |
-| `MODERN_CPP_PROJECT_ENABLE_CODE_COVERAGE` | `OFF` | Enable gcov code coverage |
+| `ATLAS_ENABLE_TESTING` | `ON` | Build unit tests |
+| `ATLAS_ENABLE_STANDALONE` | `ON` | Build standalone binary |
+| `ATLAS_BUILD_SHARED_LIBS` | `ON` | Build shared library (OFF = static) |
+| `ATLAS_BUILD_HEADERS_ONLY` | `OFF` | Header-only library mode |
+| `ATLAS_WARNINGS_AS_ERRORS` | `OFF` | Treat compiler warnings as errors |
+| `ATLAS_ENABLE_CLANG_TIDY` | `OFF` | Enable clang-tidy static analysis |
+| `ATLAS_ENABLE_CPPCHECK` | `OFF` | Enable cppcheck static analysis |
+| `ATLAS_ENABLE_CCACHE` | `OFF` | Enable ccache for faster rebuilds |
+| `ATLAS_ENABLE_CODE_COVERAGE` | `OFF` | Enable gcov code coverage |
 | `CPM_SOURCE_CACHE` | — | Path to CPM download cache (set as env var to persist across builds) |
 
 ## Makefile convenience targets
@@ -217,7 +217,7 @@ This replaces all occurrences of `Greeter`/`greeter` with `MyProject`/`myproject
 make test         # clean build + run tests (Release)
 make coverage     # gcov coverage report
 make docs         # Doxygen HTML docs
-make install      # install to /tmp/modern_cpp_project
+make install      # install to /tmp/atlas
 make format       # check formatting (clang-format + cmake-format)
 make fix-format   # auto-fix formatting
 make check        # run cppcheck

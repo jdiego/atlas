@@ -1,5 +1,5 @@
-#include "modern_cpp_project/greeter.hpp"
-#include "modern_cpp_project/version.hpp"
+#include "atlas/greeter.hpp"
+#include "atlas/version.hpp"
 
 #include <cxxopts.hpp>
 #include <format>
@@ -8,7 +8,7 @@
 #include <unordered_map>
 
 int main(int argc, char** argv) {
-    cxxopts::Options options(MODERN_CPP_PROJECT_NAME, "A modern C++ greeter application");
+    cxxopts::Options options(ATLAS_NAME, "A modern C++ greeter application");
 
     // clang-format off
     options.add_options()
@@ -26,15 +26,15 @@ int main(int argc, char** argv) {
     }
 
     if (result.count("version")) {
-        std::cout << std::format("{} v{}\n", MODERN_CPP_PROJECT_NAME, MODERN_CPP_PROJECT_VERSION);
+        std::cout << std::format("{} v{}\n", ATLAS_NAME, ATLAS_VERSION);
         return 0;
     }
 
-    const std::unordered_map<std::string, greeter::LanguageCode> languages{
-        {"en", greeter::LanguageCode::EN},
-        {"de", greeter::LanguageCode::DE},
-        {"es", greeter::LanguageCode::ES},
-        {"fr", greeter::LanguageCode::FR},
+    const std::unordered_map<std::string, atlas::LanguageCode> languages{
+        {"en", atlas::LanguageCode::EN},
+        {"de", atlas::LanguageCode::DE},
+        {"es", atlas::LanguageCode::ES},
+        {"fr", atlas::LanguageCode::FR},
     };
 
     const auto name = result["name"].as<std::string>();
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    greeter::Greeter greeter(name);
+    atlas::Atlas greeter(name);
     std::cout << std::format("{}\n", greeter.greet(it->second));
 
     return 0;

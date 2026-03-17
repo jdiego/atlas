@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25...4.2)
 
-set(MODULE_NAME modern_cpp_project)
+set(MODULE_NAME atlas)
 set(TEST_SUITE ModernCppProjectTestRunner)
 
 project(${TEST_SUITE} LANGUAGES CXX)

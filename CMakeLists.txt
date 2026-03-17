@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25...4.2)
 # Define the Project Name and Description
 # ##############################################################################
 project(
-    modern_cpp_project
+    atlas
     VERSION 1.0.0
     LANGUAGES CXX
     DESCRIPTION "ModernCppProject is a project template for Modern C++"
