@@ -8,7 +8,7 @@ set(BOOST_NO_SYSTEM_PATHS ON)
 # Search for Boost libraries.
 find_package(Boost REQUIRED)
 if(Boost_FOUND)
-  if(NOT Boost_VERSION_STRING VERSION_LESS 1.71.0)
+  if(NOT Boost_VERSION_STRING VERSION_LESS 1.90.0)
     message(
       STATUS
         "New Boost version may have incorrect or missing dependencies and imported targets"

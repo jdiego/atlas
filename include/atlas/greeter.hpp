@@ -2,7 +2,7 @@
 #define GREETER_HPP
 
 #include <string>
-
+#include <boost/asio.hpp>
 namespace atlas {
 
 /**  Language codes to be used with the Atlas class */

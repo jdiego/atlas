@@ -22,6 +22,7 @@ endif()
 message(STATUS "Started CMake for ${PROJECT_NAME} v${PROJECT_VERSION}...\n")
 
 include(CMakeDependentOption)
+include(CheckIncludeFileCXX)
 include(CheckCXXCompilerFlag)
 include(CheckTypeSize)
 include(CMakePrintHelpers)
@@ -108,6 +109,32 @@ CPMAddPackage(
 )
 list(APPEND ${PROJECT_NAME}_DEPENDENCIES "spdlog 1.15.0")
 
+
+
+set(Boost_NO_BOOST_CMAKE ON)
+find_package(Boost REQUIRED)
+list(APPEND ${PROJECT_NAME}_DEPENDENCIES "Boost")
+
+set(CMAKE_REQUIRED_INCLUDES ${Boost_INCLUDE_DIRS})
+check_include_file_cxx(boost/asio.hpp ATLAS_HAS_BOOST_ASIO_HPP)
+unset(CMAKE_REQUIRED_INCLUDES)
+
+if(NOT ATLAS_HAS_BOOST_ASIO_HPP)
+    message(FATAL_ERROR
+        "Boost was found, but the header 'boost/asio.hpp' is not available. "
+        "Check your Boost installation and include paths."
+    )
+endif()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
+
+if(TARGET PkgConfig::LIBPQ AND NOT TARGET postgresql::postgresql)
+    add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::LIBPQ)
+endif()
+
+
+
 set(CMAKE_VERIFY_INTERFACE_HEADER_SETS ${PROJECT_IS_TOP_LEVEL})
 
 
@@ -149,6 +176,11 @@ string(TOLOWER ${PROJECT_NAME}/version.hpp VERSION_HEADER_LOCATION)
 if(${PROJECT_NAME_UPPERCASE}_BUILD_HEADERS_ONLY)
     add_library(${PROJECT_NAME_LOWERCASE} INTERFACE)
     target_compile_features(${PROJECT_NAME_LOWERCASE} INTERFACE cxx_std_23)
+    target_include_directories(
+        ${PROJECT_NAME_LOWERCASE}
+        INTERFACE
+            ${Boost_INCLUDE_DIRS}
+    )
 
     target_sources(
         ${PROJECT_NAME_LOWERCASE}
@@ -169,6 +201,11 @@ else()
     add_library(${PROJECT_NAME_LOWERCASE})
     target_compile_features(${PROJECT_NAME_LOWERCASE} PUBLIC cxx_std_23)
     verbose_message("Added all header and implementation files.\n")
+    target_include_directories(
+        ${PROJECT_NAME_LOWERCASE}
+        PUBLIC
+            ${Boost_INCLUDE_DIRS}
+    )
 
     target_sources(
         ${PROJECT_NAME_LOWERCASE}
@@ -191,7 +228,9 @@ else()
     target_link_libraries(
         ${PROJECT_NAME_LOWERCASE}
         PRIVATE
-            Threads::Threads spdlog::spdlog
+            Threads::Threads
+            spdlog::spdlog
+            PostgreSQL::PostgreSQL
     )
 endif()
 
