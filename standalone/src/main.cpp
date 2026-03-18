@@ -1,4 +1,3 @@
-#include "atlas/greeter.hpp"
 #include "atlas/version.hpp"
 
 #include <cxxopts.hpp>
@@ -13,9 +12,7 @@ int main(int argc, char** argv) {
     // clang-format off
     options.add_options()
         ("h,help",    "Print usage")
-        ("v,version", "Print version")
-        ("n,name",    "Name to greet",    cxxopts::value<std::string>()->default_value("World"))
-        ("l,lang",    "Language (en/de/es/fr)", cxxopts::value<std::string>()->default_value("en"));
+        ("v,version", "Print version");
     // clang-format on
 
     auto result = options.parse(argc, argv);
@@ -29,25 +26,6 @@ int main(int argc, char** argv) {
         std::cout << std::format("{} v{}\n", ATLAS_NAME, ATLAS_VERSION);
         return 0;
     }
-
-    const std::unordered_map<std::string, atlas::LanguageCode> languages{
-        {"en", atlas::LanguageCode::EN},
-        {"de", atlas::LanguageCode::DE},
-        {"es", atlas::LanguageCode::ES},
-        {"fr", atlas::LanguageCode::FR},
-    };
-
-    const auto name = result["name"].as<std::string>();
-    const auto lang = result["lang"].as<std::string>();
-
-    const auto it = languages.find(lang);
-    if (it == languages.end()) {
-        std::cerr << std::format("Error: unsupported language '{}'. Use: en, de, es, fr\n", lang);
-        return 1;
-    }
-
-    atlas::Atlas greeter(name);
-    std::cout << std::format("{}\n", greeter.greet(it->second));
 
     return 0;
 }

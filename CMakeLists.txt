@@ -181,6 +181,10 @@ if(${PROJECT_NAME_UPPERCASE}_BUILD_HEADERS_ONLY)
         INTERFACE
             ${Boost_INCLUDE_DIRS}
     )
+    target_link_libraries(
+        ${PROJECT_NAME_LOWERCASE}
+        INTERFACE PostgreSQL::PostgreSQL
+    )
 
     target_sources(
         ${PROJECT_NAME_LOWERCASE}
@@ -227,10 +231,11 @@ else()
     find_package(Threads REQUIRED)
     target_link_libraries(
         ${PROJECT_NAME_LOWERCASE}
+        PUBLIC
+            PostgreSQL::PostgreSQL
         PRIVATE
             Threads::Threads
             spdlog::spdlog
-            PostgreSQL::PostgreSQL
     )
 endif()
 
