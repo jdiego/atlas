@@ -2,20 +2,19 @@
 
 #include <libpq-fe.h>
 
+#include "atlas/pg/error.hpp"
+#include "atlas/pg/result.hpp"
+#include <cstdint>
 #include <expected>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
-
-#include "atlas/pg/error.hpp"
-#include "atlas/pg/result.hpp"
-
 namespace atlas::pg {
 
 using text_param = std::optional<std::string_view>;
-
-enum class poll_state {
+using text_parameters = std::span<const text_param>;
+enum class poll_state : std::uint8_t {
     reading,
     writing,
     active,
@@ -25,7 +24,7 @@ enum class poll_state {
 namespace detail {
 
 struct connection_deleter {
-    void operator()(PGconn* handle) const noexcept;
+    void operator()(PGconn *handle) const noexcept;
 };
 
 } // namespace detail
@@ -35,11 +34,11 @@ public:
     connection() noexcept = default;
     ~connection() = default;
 
-    connection(const connection&) = delete;
-    auto operator=(const connection&) -> connection& = delete;
+    connection(const connection &) = delete;
+    auto operator=(const connection &) -> connection & = delete;
 
-    connection(connection&&) noexcept = default;
-    auto operator=(connection&&) noexcept -> connection& = default;
+    connection(connection &&) noexcept = default;
+    auto operator=(connection &&) noexcept -> connection & = default;
 
     [[nodiscard]] static auto connect(std::string_view conninfo) -> std::expected<connection, error>;
     [[nodiscard]] static auto connect_start(std::string_view conninfo) -> std::expected<connection, error>;
@@ -47,12 +46,10 @@ public:
     [[nodiscard]] auto poll_connect() -> std::expected<poll_state, error>;
 
     [[nodiscard]] auto exec(std::string_view sql) -> std::expected<result, error>;
-    [[nodiscard]] auto exec_params(std::string_view sql, std::span<const text_param> params)
-        -> std::expected<result, error>;
+    [[nodiscard]] auto exec_params(std::string_view sql, text_parameters params) -> std::expected<result, error>;
 
     [[nodiscard]] auto send_query(std::string_view sql) -> std::expected<void, error>;
-    [[nodiscard]] auto send_query_params(std::string_view sql, std::span<const text_param> params)
-        -> std::expected<void, error>;
+    [[nodiscard]] auto send_query_params(std::string_view sql, text_parameters params) -> std::expected<void, error>;
 
     [[nodiscard]] auto flush() -> std::expected<bool, error>;
     [[nodiscard]] auto consume_input() -> std::expected<void, error>;
@@ -73,12 +70,12 @@ private:
 
     explicit connection(handle_type handle) noexcept;
 
-    [[nodiscard]] auto ensure_handle() const -> std::expected<PGconn*, error>;
-    [[nodiscard]] auto ensure_open() const -> std::expected<PGconn*, error>;
+    [[nodiscard]] auto ensure_handle() const -> std::expected<PGconn *, error>;
+    [[nodiscard]] auto ensure_open() const -> std::expected<PGconn *, error>;
     [[nodiscard]] auto ensure_nonblocking() -> std::expected<void, error>;
-    [[nodiscard]] auto wrap_result(PGresult* raw) -> std::expected<result, error>;
+    [[nodiscard]] auto wrap_result(PGresult *raw) -> std::expected<result, error>;
 
-    handle_type handle_ {};
+    handle_type handle_;
 };
 
 } // namespace atlas::pg

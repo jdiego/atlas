@@ -9,7 +9,7 @@ on:
 env:
   BUILD_TYPE: Release
   PROJECT_NAME: ATLAS
-  APP_NAME: modern_cpp_app
+  APP_NAME: altas-standalone 
   CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
 
 jobs:

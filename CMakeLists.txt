@@ -6,7 +6,7 @@ project(
     atlas
     VERSION 1.0.0
     LANGUAGES CXX
-    DESCRIPTION "ModernCppProject is a project template for Modern C++"
+    DESCRIPTION "Atlas is modern C++ client library for PostgreSQL, built on top of Boost.Asio and libpq."
 )
 
 # ##############################################################################
