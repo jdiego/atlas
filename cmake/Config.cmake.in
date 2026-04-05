@@ -1,5 +1,31 @@
 include(CMakeFindDependencyMacro)
 
+if(NOT TARGET Boost::boost)
+  find_package(Boost QUIET CONFIG)
+
+  if(TARGET Boost::headers AND NOT TARGET Boost::boost)
+    add_library(Boost::boost INTERFACE IMPORTED)
+    set_property(TARGET Boost::boost PROPERTY INTERFACE_LINK_LIBRARIES Boost::headers)
+  elseif(NOT TARGET Boost::boost)
+    find_path(Boost_INCLUDE_DIR
+      NAMES boost/asio.hpp
+      DOC "Boost include directory"
+    )
+
+    if(NOT Boost_INCLUDE_DIR)
+      message(FATAL_ERROR
+        "@PROJECT_NAME@ requires Boost headers with boost/asio.hpp. "
+        "Install the Boost development package or set Boost_INCLUDE_DIR/CMAKE_PREFIX_PATH."
+      )
+    endif()
+
+    add_library(Boost::boost INTERFACE IMPORTED)
+    set_target_properties(Boost::boost PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIR}"
+    )
+  endif()
+endif()
+
 string(REGEX MATCHALL "[^;]+" SEPARATE_DEPENDENCIES "@PROJECT_DEPENDENCIES@")
 
 foreach(dependency ${SEPARATE_DEPENDENCIES})
