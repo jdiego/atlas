@@ -29,7 +29,9 @@ jobs:
         run: |
           brew update
           brew install boost pkg-config libpq
-          
+          LIBPQ_PKGCONFIG_DIR="$(brew --prefix libpq)/lib/pkgconfig"
+          echo "PKG_CONFIG_PATH=${LIBPQ_PKGCONFIG_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "$GITHUB_ENV"
+
       - name: Configure
         run: |
           cmake -B build \
