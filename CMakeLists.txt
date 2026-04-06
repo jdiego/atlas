@@ -6,7 +6,7 @@ project(
     atlas
     VERSION 1.0.0
     LANGUAGES CXX
-    DESCRIPTION "ModernCppProject is a project template for Modern C++"
+    DESCRIPTION "Atlas is modern C++ client library for PostgreSQL, built on top of Boost.Asio and libpq."
 )
 
 # ##############################################################################
@@ -109,15 +109,42 @@ CPMAddPackage(
 )
 list(APPEND ${PROJECT_NAME}_DEPENDENCIES "spdlog 1.15.0")
 
+find_package(Boost QUIET CONFIG)
+if(TARGET Boost::headers AND NOT TARGET Boost::boost)
+    add_library(Boost::boost INTERFACE IMPORTED)
+    set_property(TARGET Boost::boost PROPERTY
+        INTERFACE_LINK_LIBRARIES Boost::headers
+    )
+endif()
 
+if(NOT TARGET Boost::boost)
+    find_path(Boost_INCLUDE_DIR
+        NAMES boost/asio.hpp
+        DOC "Boost include directory"
+    )
 
-set(Boost_NO_BOOST_CMAKE ON)
-find_package(Boost REQUIRED)
-list(APPEND ${PROJECT_NAME}_DEPENDENCIES "Boost")
+    if(NOT Boost_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "Boost headers were not found. Install the Boost development package "
+            "or set Boost_INCLUDE_DIR/CMAKE_PREFIX_PATH to a location that "
+            "contains boost/asio.hpp."
+        )
+    endif()
 
+    set(Boost_INCLUDE_DIRS "${Boost_INCLUDE_DIR}")
+    add_library(Boost::boost INTERFACE IMPORTED)
+    set_target_properties(Boost::boost PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${Boost_INCLUDE_DIR}"
+    )
+elseif(NOT Boost_INCLUDE_DIRS)
+    get_target_property(Boost_INCLUDE_DIRS Boost::boost INTERFACE_INCLUDE_DIRECTORIES)
+endif()
+
+set(_atlas_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
 set(CMAKE_REQUIRED_INCLUDES ${Boost_INCLUDE_DIRS})
 check_include_file_cxx(boost/asio.hpp ATLAS_HAS_BOOST_ASIO_HPP)
-unset(CMAKE_REQUIRED_INCLUDES)
+set(CMAKE_REQUIRED_INCLUDES "${_atlas_saved_required_includes}")
+unset(_atlas_saved_required_includes)
 
 if(NOT ATLAS_HAS_BOOST_ASIO_HPP)
     message(FATAL_ERROR
@@ -129,7 +156,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
-if(TARGET PkgConfig::LIBPQ AND NOT TARGET postgresql::postgresql)
+if(TARGET PkgConfig::LIBPQ AND NOT TARGET PostgreSQL::PostgreSQL)
     add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::LIBPQ)
 endif()
 
@@ -174,12 +201,15 @@ configure_file(
 string(TOLOWER ${PROJECT_NAME}/version.hpp VERSION_HEADER_LOCATION)
 
 if(${PROJECT_NAME_UPPERCASE}_BUILD_HEADERS_ONLY)
+    message(FATAL_ERROR
+        "${PROJECT_NAME} cannot be built as a header-only library. "
+        "The PostgreSQL client API uses PIMPL and links libpq as a private implementation dependency."
+    )
     add_library(${PROJECT_NAME_LOWERCASE} INTERFACE)
     target_compile_features(${PROJECT_NAME_LOWERCASE} INTERFACE cxx_std_23)
-    target_include_directories(
+    target_link_libraries(
         ${PROJECT_NAME_LOWERCASE}
-        INTERFACE
-            ${Boost_INCLUDE_DIRS}
+        INTERFACE Boost::boost
     )
 
     target_sources(
@@ -201,11 +231,6 @@ else()
     add_library(${PROJECT_NAME_LOWERCASE})
     target_compile_features(${PROJECT_NAME_LOWERCASE} PUBLIC cxx_std_23)
     verbose_message("Added all header and implementation files.\n")
-    target_include_directories(
-        ${PROJECT_NAME_LOWERCASE}
-        PUBLIC
-            ${Boost_INCLUDE_DIRS}
-    )
 
     target_sources(
         ${PROJECT_NAME_LOWERCASE}
@@ -227,10 +252,12 @@ else()
     find_package(Threads REQUIRED)
     target_link_libraries(
         ${PROJECT_NAME_LOWERCASE}
+        PUBLIC
+            Boost::boost
         PRIVATE
+            PostgreSQL::PostgreSQL
             Threads::Threads
             spdlog::spdlog
-            PostgreSQL::PostgreSQL
     )
 endif()
 

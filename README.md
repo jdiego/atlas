@@ -143,8 +143,8 @@ The `standalone/` directory is also a self-contained project:
 ```bash
 cmake -B build/standalone -S standalone
 cmake --build build/standalone
-./build/standalone/bin/modern_cpp_app --help
-./build/standalone/bin/modern_cpp_app --name Alice --lang fr
+./build/standalone/bin/altas_app --help
+./build/standalone/bin/altas_app --name Alice --lang fr
 ```
 
 ---

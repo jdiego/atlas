@@ -114,7 +114,7 @@ ctest --preset dev
 
 APP_EXECUTABLE_NAME=$(sed -nE 's/^[[:space:]]*set\(APP_EXECUTABLE_NAME[[:space:]]+"([^"]+)".*/\1/p' standalone/CMakeLists.txt | head -n 1)
 if [[ -z "${APP_EXECUTABLE_NAME}" ]]; then
-    APP_EXECUTABLE_NAME="modern_cpp_app"
+    APP_EXECUTABLE_NAME="atlas_app"
 fi
 
 echo ""

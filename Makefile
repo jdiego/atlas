@@ -87,7 +87,7 @@ uninstall: ## uninstall the package to the `INSTALL_LOCATION`
 	cmake --build build --target uninstall
 
 check:
-	cppcheck --std=c++20 \
+	cppcheck --std=c++23 \
 		--suppress=noExplicitConstructor \
 		--inline-suppr --enable=all \
 		--suppress=missingIncludeSystem \

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25...4.2)
 
 project(Standalone LANGUAGES CXX)
 
-set(APP_EXECUTABLE_NAME "modern_cpp_app")
+set(APP_EXECUTABLE_NAME "atlas_app")
 set(LIBRARY_TARGET_NAME "atlas")
 
 if(PROJECT_IS_TOP_LEVEL)
