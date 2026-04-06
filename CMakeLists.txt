@@ -156,7 +156,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
 
-if(TARGET PkgConfig::LIBPQ AND NOT TARGET postgresql::postgresql)
+if(TARGET PkgConfig::LIBPQ AND NOT TARGET PostgreSQL::PostgreSQL)
     add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::LIBPQ)
 endif()
 
@@ -201,12 +201,15 @@ configure_file(
 string(TOLOWER ${PROJECT_NAME}/version.hpp VERSION_HEADER_LOCATION)
 
 if(${PROJECT_NAME_UPPERCASE}_BUILD_HEADERS_ONLY)
+    message(FATAL_ERROR
+        "${PROJECT_NAME} cannot be built as a header-only library. "
+        "The PostgreSQL client API uses PIMPL and links libpq as a private implementation dependency."
+    )
     add_library(${PROJECT_NAME_LOWERCASE} INTERFACE)
     target_compile_features(${PROJECT_NAME_LOWERCASE} INTERFACE cxx_std_23)
     target_link_libraries(
         ${PROJECT_NAME_LOWERCASE}
-        INTERFACE PostgreSQL::PostgreSQL
-                  Boost::boost
+        INTERFACE Boost::boost
     )
 
     target_sources(
@@ -251,8 +254,8 @@ else()
         ${PROJECT_NAME_LOWERCASE}
         PUBLIC
             Boost::boost
-            PostgreSQL::PostgreSQL
         PRIVATE
+            PostgreSQL::PostgreSQL
             Threads::Threads
             spdlog::spdlog
     )

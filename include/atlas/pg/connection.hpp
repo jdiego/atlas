@@ -1,9 +1,8 @@
 #pragma once
 
-#include <libpq-fe.h>
-
 #include "atlas/pg/error.hpp"
 #include "atlas/pg/result.hpp"
+#include "atlas/pg/types.hpp"
 #include <cstdint>
 #include <expected>
 #include <memory>
@@ -21,24 +20,16 @@ enum class poll_state : std::uint8_t {
     ready,
 };
 
-namespace detail {
-
-struct connection_deleter {
-    void operator()(PGconn *handle) const noexcept;
-};
-
-} // namespace detail
-
 class connection {
 public:
-    connection() noexcept = default;
-    ~connection() = default;
+    connection() noexcept;
+    ~connection();
 
     connection(const connection &) = delete;
     auto operator=(const connection &) -> connection & = delete;
 
-    connection(connection &&) noexcept = default;
-    auto operator=(connection &&) noexcept -> connection & = default;
+    connection(connection &&) noexcept;
+    auto operator=(connection &&) noexcept -> connection &;
 
     [[nodiscard]] static auto connect(std::string_view conninfo) -> std::expected<connection, error>;
     [[nodiscard]] static auto connect_start(std::string_view conninfo) -> std::expected<connection, error>;
@@ -61,21 +52,16 @@ public:
 
     [[nodiscard]] auto is_busy() const noexcept -> bool;
     [[nodiscard]] auto is_alive() const noexcept -> bool;
-    [[nodiscard]] auto status() const noexcept -> ConnStatusType;
+    [[nodiscard]] auto status() const noexcept -> connection_status;
     [[nodiscard]] auto backend_pid() const noexcept -> int;
     [[nodiscard]] auto socket_fd() const noexcept -> int;
 
 private:
-    using handle_type = std::unique_ptr<PGconn, detail::connection_deleter>;
+    struct impl;
 
-    explicit connection(handle_type handle) noexcept;
+    explicit connection(std::unique_ptr<impl> impl) noexcept;
 
-    [[nodiscard]] auto ensure_handle() const -> std::expected<PGconn *, error>;
-    [[nodiscard]] auto ensure_open() const -> std::expected<PGconn *, error>;
-    [[nodiscard]] auto ensure_nonblocking() -> std::expected<void, error>;
-    [[nodiscard]] auto wrap_result(PGresult *raw) -> std::expected<result, error>;
-
-    handle_type handle_;
+    std::unique_ptr<impl> impl_ {};
 };
 
 } // namespace atlas::pg

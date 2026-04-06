@@ -1,7 +1,11 @@
 #include "atlas/pg/connection.hpp"
+#include "detail/result_access.hpp"
+
+#include <libpq-fe.h>
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -133,79 +137,122 @@ struct prepared_params {
     case PGRES_COPY_IN:
     case PGRES_COPY_BOTH:
     case PGRES_SINGLE_TUPLE:
+    case PGRES_PIPELINE_SYNC:
+    case PGRES_PIPELINE_ABORTED:
+    case PGRES_TUPLES_CHUNK:
         return true;
     default:
-        break;
+        return false;
     }
+}
 
-#ifdef PGRES_TUPLES_CHUNK
-    if (status == PGRES_TUPLES_CHUNK) {
-        return true;
+[[nodiscard]] auto map_connection_status(ConnStatusType status) noexcept -> connection_status {
+    switch (status) {
+    case CONNECTION_OK:
+        return connection_status::ok;
+    case CONNECTION_BAD:
+        return connection_status::bad;
+    case CONNECTION_STARTED:
+        return connection_status::started;
+    case CONNECTION_MADE:
+        return connection_status::made;
+    case CONNECTION_AWAITING_RESPONSE:
+        return connection_status::awaiting_response;
+    case CONNECTION_AUTH_OK:
+        return connection_status::auth_ok;
+    case CONNECTION_SETENV:
+        return connection_status::setenv;
+    case CONNECTION_SSL_STARTUP:
+        return connection_status::ssl_startup;
+    case CONNECTION_NEEDED:
+        return connection_status::needed;
+    case CONNECTION_CHECK_WRITABLE:
+        return connection_status::check_writable;
+    case CONNECTION_CONSUME:
+        return connection_status::consume;
+    case CONNECTION_GSS_STARTUP:
+        return connection_status::gss_startup;
+    case CONNECTION_CHECK_TARGET:
+        return connection_status::check_target;
+    case CONNECTION_CHECK_STANDBY:
+        return connection_status::check_standby;
+    case CONNECTION_ALLOCATED:
+        return connection_status::allocated;
+    case CONNECTION_AUTHENTICATING:
+        return connection_status::authenticating;
+    default:
+        return connection_status::unknown;
     }
-#endif
-
-#ifdef PGRES_PIPELINE_SYNC
-    if (status == PGRES_PIPELINE_SYNC) {
-        return true;
-    }
-#endif
-
-#ifdef PGRES_PIPELINE_ABORTED
-    if (status == PGRES_PIPELINE_ABORTED) {
-        return true;
-    }
-#endif
-
-    return false;
 }
 
 } // namespace
 
-void detail::connection_deleter::operator()(PGconn *handle) const noexcept {
-    if (handle != nullptr) {
-        PQfinish(handle);
-    }
-}
-
-connection::connection(handle_type handle) noexcept : handle_(std::move(handle)) {
-}
-
-auto connection::ensure_handle() const -> std::expected<PGconn *, error> {
-    if (handle_ == nullptr) {
-        return std::unexpected(make_handle_error("connection"));
+struct connection::impl {
+    explicit impl(detail::connection_handle connection_handle) noexcept
+        : handle(std::move(connection_handle)) {
     }
 
-    return handle_.get();
-}
+    [[nodiscard]] auto ensure_handle() const -> std::expected<PGconn *, error> {
+        if (handle == nullptr) {
+            return std::unexpected(make_handle_error("connection"));
+        }
 
-auto connection::ensure_open() const -> std::expected<PGconn *, error> {
-    auto handle = ensure_handle();
-    if (!handle) {
-        return std::unexpected(std::move(handle.error()));
+        return handle.get();
     }
 
-    if (PQstatus(*handle) != CONNECTION_OK) {
-        return std::unexpected(make_connection_error(*handle));
+    [[nodiscard]] auto ensure_open() const -> std::expected<PGconn *, error> {
+        auto raw_handle = ensure_handle();
+        if (!raw_handle) {
+            return std::unexpected(std::move(raw_handle.error()));
+        }
+
+        if (PQstatus(*raw_handle) != CONNECTION_OK) {
+            return std::unexpected(make_connection_error(*raw_handle));
+        }
+
+        return *raw_handle;
     }
 
-    return *handle;
-}
+    [[nodiscard]] auto ensure_nonblocking() -> std::expected<void, error> {
+        auto raw_handle = ensure_handle();
+        if (!raw_handle) {
+            return std::unexpected(std::move(raw_handle.error()));
+        }
 
-auto connection::ensure_nonblocking() -> std::expected<void, error> {
-    auto handle = ensure_handle();
-    if (!handle) {
-        return std::unexpected(std::move(handle.error()));
-    }
+        if (PQisnonblocking(*raw_handle) != 0) {
+            return {};
+        }
 
-    if (PQisnonblocking(*handle) != 0) {
+        if (PQsetnonblocking(*raw_handle, 1) != 0) {
+            return std::unexpected(make_connection_error(*raw_handle, "failed to enable nonblocking mode"));
+        }
+
         return {};
     }
 
-    if (PQsetnonblocking(*handle, 1) != 0) {
-        return std::unexpected(make_connection_error(*handle, "failed to enable nonblocking mode"));
+    [[nodiscard]] auto wrap_result(PGresult *raw) const -> std::expected<result, error> {
+        if (raw == nullptr) {
+            return std::unexpected(make_connection_error(handle.get(), "libpq returned a null result handle"));
+        }
+
+        detail::result_handle result_handle{raw};
+        if (is_success_status(PQresultStatus(result_handle.get()))) {
+            return detail::result_access::make(std::move(result_handle));
+        }
+
+        return std::unexpected(make_result_error(result_handle.get()));
     }
 
-    return {};
+    detail::connection_handle handle {};
+};
+
+connection::connection() noexcept = default;
+connection::~connection() = default;
+connection::connection(connection &&) noexcept = default;
+auto connection::operator=(connection &&) noexcept -> connection & = default;
+
+connection::connection(std::unique_ptr<impl> impl) noexcept
+    : impl_(std::move(impl)) {
 }
 
 auto connection::connect(std::string_view conninfo) -> std::expected<connection, error> {
@@ -214,7 +261,7 @@ auto connection::connect(std::string_view conninfo) -> std::expected<connection,
         return std::unexpected(std::move(copied_conninfo.error()));
     }
 
-    handle_type handle{PQconnectdb(copied_conninfo->c_str())};
+    detail::connection_handle handle{PQconnectdb(copied_conninfo->c_str())};
     if (handle == nullptr) {
         return std::unexpected(make_error("PQconnectdb returned a null connection handle", errc::connection_failure));
     }
@@ -223,13 +270,13 @@ auto connection::connect(std::string_view conninfo) -> std::expected<connection,
         return std::unexpected(make_connection_error(handle.get()));
     }
 
-    connection conn{std::move(handle)};
-    auto nonblocking = conn.ensure_nonblocking();
+    auto impl = std::make_unique<connection::impl>(std::move(handle));
+    auto nonblocking = impl->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
 
-    return conn;
+    return connection{std::move(impl)};
 }
 
 auto connection::connect_start(std::string_view conninfo) -> std::expected<connection, error> {
@@ -238,7 +285,7 @@ auto connection::connect_start(std::string_view conninfo) -> std::expected<conne
         return std::unexpected(std::move(copied_conninfo.error()));
     }
 
-    handle_type handle{PQconnectStart(copied_conninfo->c_str())};
+    detail::connection_handle handle{PQconnectStart(copied_conninfo->c_str())};
     if (handle == nullptr) {
         return std::unexpected(
             make_error("PQconnectStart returned a null connection handle", errc::connection_failure));
@@ -248,19 +295,23 @@ auto connection::connect_start(std::string_view conninfo) -> std::expected<conne
         return std::unexpected(make_connection_error(handle.get()));
     }
 
-    connection conn{std::move(handle)};
-    if (conn.status() == CONNECTION_OK) {
-        auto nonblocking = conn.ensure_nonblocking();
+    auto impl = std::make_unique<connection::impl>(std::move(handle));
+    if (map_connection_status(PQstatus(impl->handle.get())) == connection_status::ok) {
+        auto nonblocking = impl->ensure_nonblocking();
         if (!nonblocking) {
             return std::unexpected(std::move(nonblocking.error()));
         }
     }
 
-    return conn;
+    return connection{std::move(impl)};
 }
 
 auto connection::poll_connect() -> std::expected<poll_state, error> {
-    auto handle = ensure_handle();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_handle();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -273,7 +324,7 @@ auto connection::poll_connect() -> std::expected<poll_state, error> {
     case PGRES_POLLING_ACTIVE:
         return poll_state::active;
     case PGRES_POLLING_OK: {
-        auto nonblocking = ensure_nonblocking();
+        auto nonblocking = impl_->ensure_nonblocking();
         if (!nonblocking) {
             return std::unexpected(std::move(nonblocking.error()));
         }
@@ -287,7 +338,11 @@ auto connection::poll_connect() -> std::expected<poll_state, error> {
 }
 
 auto connection::exec(std::string_view sql) -> std::expected<result, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -297,11 +352,15 @@ auto connection::exec(std::string_view sql) -> std::expected<result, error> {
         return std::unexpected(std::move(copied_sql.error()));
     }
 
-    return wrap_result(PQexec(*handle, copied_sql->c_str()));
+    return impl_->wrap_result(PQexec(*handle, copied_sql->c_str()));
 }
 
 auto connection::exec_params(std::string_view sql, text_parameters params) -> std::expected<result, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -317,17 +376,21 @@ auto connection::exec_params(std::string_view sql, text_parameters params) -> st
     }
 
     const auto *values = prepared->raw_values.empty() ? nullptr : prepared->raw_values.data();
-    return wrap_result(
+    return impl_->wrap_result(
         PQexecParams(*handle, copied_sql->c_str(), prepared->count, nullptr, values, nullptr, nullptr, 0));
 }
 
 auto connection::send_query(std::string_view sql) -> std::expected<void, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -344,14 +407,18 @@ auto connection::send_query(std::string_view sql) -> std::expected<void, error> 
     return {};
 }
 
-auto connection::send_query_params(std::string_view sql, std::span<const text_param> params)
+auto connection::send_query_params(std::string_view sql, text_parameters params)
     -> std::expected<void, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -375,12 +442,16 @@ auto connection::send_query_params(std::string_view sql, std::span<const text_pa
 }
 
 auto connection::flush() -> std::expected<bool, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -397,12 +468,16 @@ auto connection::flush() -> std::expected<bool, error> {
 }
 
 auto connection::consume_input() -> std::expected<void, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -415,12 +490,16 @@ auto connection::consume_input() -> std::expected<void, error> {
 }
 
 auto connection::next_result() -> std::expected<std::optional<result>, error> {
-    auto handle = ensure_open();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_open();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -430,7 +509,7 @@ auto connection::next_result() -> std::expected<std::optional<result>, error> {
         return std::optional<result>{};
     }
 
-    auto wrapped = wrap_result(raw);
+    auto wrapped = impl_->wrap_result(raw);
     if (!wrapped) {
         return std::unexpected(std::move(wrapped.error()));
     }
@@ -439,7 +518,11 @@ auto connection::next_result() -> std::expected<std::optional<result>, error> {
 }
 
 auto connection::reset() -> std::expected<void, error> {
-    auto handle = ensure_handle();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_handle();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -449,7 +532,7 @@ auto connection::reset() -> std::expected<void, error> {
         return std::unexpected(make_connection_error(*handle));
     }
 
-    auto nonblocking = ensure_nonblocking();
+    auto nonblocking = impl_->ensure_nonblocking();
     if (!nonblocking) {
         return std::unexpected(std::move(nonblocking.error()));
     }
@@ -458,7 +541,11 @@ auto connection::reset() -> std::expected<void, error> {
 }
 
 auto connection::reset_start() -> std::expected<void, error> {
-    auto handle = ensure_handle();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_handle();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -471,7 +558,11 @@ auto connection::reset_start() -> std::expected<void, error> {
 }
 
 auto connection::poll_reset() -> std::expected<poll_state, error> {
-    auto handle = ensure_handle();
+    if (impl_ == nullptr) {
+        return std::unexpected(make_handle_error("connection"));
+    }
+
+    auto handle = impl_->ensure_handle();
     if (!handle) {
         return std::unexpected(std::move(handle.error()));
     }
@@ -484,7 +575,7 @@ auto connection::poll_reset() -> std::expected<poll_state, error> {
     case PGRES_POLLING_ACTIVE:
         return poll_state::active;
     case PGRES_POLLING_OK: {
-        auto nonblocking = ensure_nonblocking();
+        auto nonblocking = impl_->ensure_nonblocking();
         if (!nonblocking) {
             return std::unexpected(std::move(nonblocking.error()));
         }
@@ -498,53 +589,39 @@ auto connection::poll_reset() -> std::expected<poll_state, error> {
 }
 
 auto connection::is_busy() const noexcept -> bool {
-    if (handle_ == nullptr || PQstatus(handle_.get()) != CONNECTION_OK) {
+    if (impl_ == nullptr || impl_->handle == nullptr || PQstatus(impl_->handle.get()) != CONNECTION_OK) {
         return false;
     }
 
-    return PQisBusy(handle_.get()) != 0;
+    return PQisBusy(impl_->handle.get()) != 0;
 }
 
 auto connection::is_alive() const noexcept -> bool {
-    return handle_ != nullptr && PQstatus(handle_.get()) == CONNECTION_OK;
+    return impl_ != nullptr && impl_->handle != nullptr && PQstatus(impl_->handle.get()) == CONNECTION_OK;
 }
 
-auto connection::status() const noexcept -> ConnStatusType {
-    if (handle_ == nullptr) {
-        return CONNECTION_BAD;
+auto connection::status() const noexcept -> connection_status {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
+        return connection_status::bad;
     }
 
-    return PQstatus(handle_.get());
+    return map_connection_status(PQstatus(impl_->handle.get()));
 }
 
 auto connection::backend_pid() const noexcept -> int {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return 0;
     }
 
-    return PQbackendPID(handle_.get());
+    return PQbackendPID(impl_->handle.get());
 }
 
 auto connection::socket_fd() const noexcept -> int {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return -1;
     }
 
-    return PQsocket(handle_.get());
-}
-
-auto connection::wrap_result(PGresult *raw) -> std::expected<result, error> {
-    if (raw == nullptr) {
-        return std::unexpected(make_connection_error(handle_.get(), "libpq returned a null result handle"));
-    }
-
-    if (is_success_status(PQresultStatus(raw))) {
-        return result{result::handle_type{raw}};
-    }
-
-    auto err = make_result_error(raw);
-    PQclear(raw);
-    return std::unexpected(std::move(err));
+    return PQsocket(impl_->handle.get());
 }
 
 } // namespace atlas::pg

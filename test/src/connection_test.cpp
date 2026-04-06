@@ -37,9 +37,9 @@ ut::suite<"connection/unit/default_state"> default_state_suite = [] {
         expect(!conn.is_alive());
     };
 
-    "default-constructed status is CONNECTION_BAD"_test = [] {
+    "default-constructed status is bad"_test = [] {
         connection conn{};
-        expect(conn.status() == CONNECTION_BAD);
+        expect(conn.status() == connection_status::bad);
     };
 
     "default-constructed is_busy returns false"_test = [] {
@@ -173,8 +173,8 @@ ut::suite<"connection/unit/move_semantics"> move_suite = [] {
         connection a{};
         connection b{};
         b = std::move(a);
-        expect(a.status() == CONNECTION_BAD);
-        expect(b.status() == CONNECTION_BAD);
+        expect(a.status() == connection_status::bad);
+        expect(b.status() == connection_status::bad);
     };
 };
 
@@ -192,7 +192,7 @@ ut::suite<"connection/integration/connect"> connect_suite = [] {
         auto conn = connection::connect(*ci);
         expect(conn.has_value() >> fatal);
         expect(conn->is_alive());
-        expect(conn->status() == CONNECTION_OK);
+        expect(conn->status() == connection_status::ok);
     };
 
     "connect sets valid backend_pid and socket_fd"_test = [] {
@@ -514,7 +514,7 @@ ut::suite<"connection/integration/reset"> reset_suite = [] {
 
         expect(conn->reset().has_value() >> fatal);
         expect(conn->is_alive());
-        expect(conn->status() == CONNECTION_OK);
+        expect(conn->status() == connection_status::ok);
     };
 
     "connection is usable after reset"_test = [] {

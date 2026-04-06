@@ -1,6 +1,7 @@
 #pragma once
 
-#include <libpq-fe.h>
+#include "atlas/pg/error.hpp"
+#include "atlas/pg/types.hpp"
 
 #include <cstddef>
 #include <expected>
@@ -8,15 +9,11 @@
 #include <optional>
 #include <string_view>
 
-#include "atlas/pg/error.hpp"
-
 namespace atlas::pg {
 
 namespace detail {
 
-struct result_deleter {
-    void operator()(PGresult* handle) const noexcept;
-};
+struct result_access;
 
 } // namespace detail
 
@@ -24,14 +21,14 @@ class connection;
 
 class result {
 public:
-    result() noexcept = default;
-    ~result() = default;
+    result() noexcept;
+    ~result();
 
     result(const result&) = delete;
     auto operator=(const result&) -> result& = delete;
 
-    result(result&&) noexcept = default;
-    auto operator=(result&&) noexcept -> result& = default;
+    result(result&&) noexcept;
+    auto operator=(result&&) noexcept -> result&;
 
     [[nodiscard]] auto empty() const noexcept -> bool;
     [[nodiscard]] auto rows() const noexcept -> std::size_t;
@@ -41,21 +38,22 @@ public:
         -> std::expected<std::optional<std::string_view>, error>;
     [[nodiscard]] auto get(std::size_t row, std::size_t col) const
         -> std::expected<std::optional<std::string_view>, error>;
-    [[nodiscard]] auto status() const noexcept -> ExecStatusType;
+    [[nodiscard]] auto status() const noexcept -> result_status;
     [[nodiscard]] auto error_message() const noexcept -> std::string_view;
-    [[nodiscard]] auto column_type(std::size_t col) const -> std::expected<Oid, error>;
+    [[nodiscard]] auto column_type(std::size_t col) const -> std::expected<oid, error>;
 
 private:
-    using handle_type = std::unique_ptr<PGresult, detail::result_deleter>;
+    struct impl;
 
-    explicit result(handle_type handle) noexcept;
+    explicit result(std::unique_ptr<impl> impl) noexcept;
 
     [[nodiscard]] auto validate_column(std::size_t col) const -> std::expected<void, error>;
     [[nodiscard]] auto validate_cell(std::size_t row, std::size_t col) const -> std::expected<void, error>;
 
-    handle_type handle_ {};
+    std::unique_ptr<impl> impl_ {};
 
     friend class connection;
+    friend struct detail::result_access;
 };
 
 } // namespace atlas::pg

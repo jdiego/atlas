@@ -1,10 +1,22 @@
 #include "atlas/pg/result.hpp"
+#include "detail/result_access.hpp"
+
+#include <libpq-fe.h>
 
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 
 namespace atlas::pg {
+
+struct result::impl {
+    explicit impl(detail::result_handle result_handle) noexcept
+        : handle(std::move(result_handle)) {
+    }
+
+    detail::result_handle handle {};
+};
 
 namespace {
 
@@ -46,37 +58,70 @@ namespace {
     return static_cast<int>(index);
 }
 
-} // namespace
-
-void detail::result_deleter::operator()(PGresult* handle) const noexcept {
-    if (handle != nullptr) {
-        PQclear(handle);
+[[nodiscard]] auto map_result_status(ExecStatusType status) noexcept -> result_status {
+    switch (status) {
+    case PGRES_EMPTY_QUERY:
+        return result_status::empty_query;
+    case PGRES_COMMAND_OK:
+        return result_status::command_ok;
+    case PGRES_TUPLES_OK:
+        return result_status::tuples_ok;
+    case PGRES_COPY_OUT:
+        return result_status::copy_out;
+    case PGRES_COPY_IN:
+        return result_status::copy_in;
+    case PGRES_BAD_RESPONSE:
+        return result_status::bad_response;
+    case PGRES_NONFATAL_ERROR:
+        return result_status::nonfatal_error;
+    case PGRES_FATAL_ERROR:
+        return result_status::fatal_error;
+    case PGRES_COPY_BOTH:
+        return result_status::copy_both;
+    case PGRES_SINGLE_TUPLE:
+        return result_status::single_tuple;
+    case PGRES_PIPELINE_SYNC:
+        return result_status::pipeline_sync;
+    case PGRES_PIPELINE_ABORTED:
+        return result_status::pipeline_aborted;
+    case PGRES_TUPLES_CHUNK:
+        return result_status::tuples_chunk;
+    default:
+        return result_status::unknown;
     }
 }
 
-result::result(handle_type handle) noexcept
-    : handle_(std::move(handle)) {}
+} // namespace
+
+result::result() noexcept = default;
+result::~result() = default;
+result::result(result &&) noexcept = default;
+auto result::operator=(result &&) noexcept -> result & = default;
+
+result::result(std::unique_ptr<impl> impl) noexcept
+    : impl_(std::move(impl)) {
+}
 
 auto result::empty() const noexcept -> bool {
-    return handle_ == nullptr;
+    return rows() == 0U;
 }
 
 auto result::rows() const noexcept -> std::size_t {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return 0U;
     }
-    return static_cast<std::size_t>(PQntuples(handle_.get()));
+    return static_cast<std::size_t>(PQntuples(impl_->handle.get()));
 }
 
 auto result::columns() const noexcept -> std::size_t {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return 0U;
     }
-    return static_cast<std::size_t>(PQnfields(handle_.get()));
+    return static_cast<std::size_t>(PQnfields(impl_->handle.get()));
 }
 
 auto result::validate_column(std::size_t col) const -> std::expected<void, error> {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return std::unexpected(make_empty_result_error());
     }
 
@@ -94,7 +139,7 @@ auto result::validate_column(std::size_t col) const -> std::expected<void, error
 }
 
 auto result::validate_cell(std::size_t row, std::size_t col) const -> std::expected<void, error> {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return std::unexpected(make_empty_result_error());
     }
 
@@ -132,7 +177,7 @@ auto result::is_null(std::size_t row, std::size_t col) const -> std::expected<bo
         return std::unexpected(std::move(column_index.error()));
     }
 
-    return PQgetisnull(handle_.get(), *row_index, *column_index) != 0;
+    return PQgetisnull(impl_->handle.get(), *row_index, *column_index) != 0;
 }
 
 auto result::field(std::size_t row, std::size_t col) const
@@ -152,12 +197,12 @@ auto result::field(std::size_t row, std::size_t col) const
         return std::unexpected(std::move(column_index.error()));
     }
 
-    if (PQgetisnull(handle_.get(), *row_index, *column_index) != 0) {
+    if (PQgetisnull(impl_->handle.get(), *row_index, *column_index) != 0) {
         return std::optional<std::string_view> {};
     }
 
-    const auto* value = PQgetvalue(handle_.get(), *row_index, *column_index);
-    const auto length = static_cast<std::size_t>(PQgetlength(handle_.get(), *row_index, *column_index));
+    const auto *value = PQgetvalue(impl_->handle.get(), *row_index, *column_index);
+    const auto length = static_cast<std::size_t>(PQgetlength(impl_->handle.get(), *row_index, *column_index));
     return std::optional<std::string_view> {std::string_view {value, length}};
 }
 
@@ -166,19 +211,19 @@ auto result::get(std::size_t row, std::size_t col) const
     return field(row, col);
 }
 
-auto result::status() const noexcept -> ExecStatusType {
-    if (handle_ == nullptr) {
-        return PGRES_FATAL_ERROR;
+auto result::status() const noexcept -> result_status {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
+        return result_status::unknown;
     }
-    return PQresultStatus(handle_.get());
+    return map_result_status(PQresultStatus(impl_->handle.get()));
 }
 
 auto result::error_message() const noexcept -> std::string_view {
-    if (handle_ == nullptr) {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
         return {};
     }
 
-    const auto* message = PQresultErrorMessage(handle_.get());
+    const auto *message = PQresultErrorMessage(impl_->handle.get());
     if (message == nullptr) {
         return {};
     }
@@ -186,7 +231,7 @@ auto result::error_message() const noexcept -> std::string_view {
     return std::string_view {message};
 }
 
-auto result::column_type(std::size_t col) const -> std::expected<Oid, error> {
+auto result::column_type(std::size_t col) const -> std::expected<oid, error> {
     const auto checked_column = validate_column(col);
     if (!checked_column) {
         return std::unexpected(std::move(checked_column.error()));
@@ -197,7 +242,11 @@ auto result::column_type(std::size_t col) const -> std::expected<Oid, error> {
         return std::unexpected(std::move(column_index.error()));
     }
 
-    return PQftype(handle_.get(), *column_index);
+    return static_cast<oid>(PQftype(impl_->handle.get(), *column_index));
+}
+
+auto detail::result_access::make(result_handle handle) -> result {
+    return result {std::make_unique<result::impl>(std::move(handle))};
 }
 
 } // namespace atlas::pg
