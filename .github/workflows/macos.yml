@@ -41,8 +41,11 @@ jobs:
             -D${PROJECT_NAME}_ENABLE_STANDALONE=ON
 
       - name: Build
-        run: cmake --build build --config $BUILD_TYPE -j$(sysctl -n hw.logicalcpu)
-
+        run: |
+          J=$(sysctl -n hw.logicalcpu)
+          if [ "$J" -gt 4 ]; then J=4; fi
+          cmake --build build --config $BUILD_TYPE -j$J
+          
       - name: Test
         run: ctest --test-dir build -C $BUILD_TYPE --output-on-failure
 
