@@ -28,12 +28,9 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install boost pkg-config libpq llvm
+          brew install boost pkg-config libpq
           LIBPQ_PKGCONFIG_DIR="$(brew --prefix libpq)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=${LIBPQ_PKGCONFIG_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "$GITHUB_ENV"
-          echo "CC=$(brew --prefix llvm)/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> "$GITHUB_ENV"
-
 
       - name: Configure
         run: |
