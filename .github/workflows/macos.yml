@@ -42,9 +42,7 @@ jobs:
 
       - name: Build
         run: |
-          J=$(sysctl -n hw.logicalcpu)
-          if [ "$J" -gt 4 ]; then J=4; fi
-          cmake --build build --config $BUILD_TYPE -j$J
+          cmake --build build --config $BUILD_TYPE
           
       - name: Test
         run: ctest --test-dir build -C $BUILD_TYPE --output-on-failure
