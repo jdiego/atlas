@@ -1,7 +1,4 @@
 #pragma once
-
-// atlas/schema/serde.hpp
-//
 // Converts between Entity instances and the text-format parameter arrays
 // used by PQsendQueryParams, and parses result rows back into entities.
 //
@@ -39,154 +36,212 @@ namespace atlas {
 // Serialization helpers (entity member → PostgreSQL text protocol string)
 // ---------------------------------------------------------------------------
 
+
 namespace detail {
 
-inline std::string serialize_value(bool v) {
-    return v ? "t" : "f";
-}
-
-inline std::string serialize_value(int16_t v) { return std::to_string(v); }
-inline std::string serialize_value(int32_t v) { return std::to_string(v); }
-inline std::string serialize_value(int64_t v) { return std::to_string(v); }
-
-// TODO (locale): std::to_string for floats is locale-dependent.
-inline std::string serialize_value(float v)  { return std::to_string(v); }
-inline std::string serialize_value(double v) { return std::to_string(v); }
-
-// std::string passes through as-is; PQsendQueryParams handles quoting.
-inline std::string serialize_value(const std::string& v) { return v; }
-
-// pg_uuid → 8-4-4-4-12 lowercase hex (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-inline std::string serialize_value(const pg_uuid& u) {
-    const auto& b = u.bytes;
-    return std::format(
-        "{:02x}{:02x}{:02x}{:02x}-"
-        "{:02x}{:02x}-"
-        "{:02x}{:02x}-"
-        "{:02x}{:02x}-"
-        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7],
-        b[8],b[9], b[10],b[11],b[12],b[13],b[14],b[15]);
-}
-
-// time_point → ISO 8601 UTC string "YYYY-MM-DDTHH:MM:SSZ"
-inline std::string serialize_value(
-    const std::chrono::system_clock::time_point& tp)
-{
-    // std::format with %FT%TZ (C++20 chrono format)
-    return std::format("{:%FT%TZ}", tp);
-}
-
-// vector<uint8_t> → PostgreSQL hex-escaped bytea "\\xDEADBEEF"
-inline std::string serialize_value(const std::vector<uint8_t>& v) {
-    std::string out;
-    out.reserve(2 + v.size() * 2);
-    out += "\\x";
-    for (uint8_t b : v) {
-        out += std::format("{:02X}", b);
-    }
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// Deserialization helpers (std::string_view → member type)
-// ---------------------------------------------------------------------------
-
+// Primary template — left undefined. Compiler error = unsupported type.
+// To add a new type: specialize value_serializer<T> with a static
+// `std::string to_string(const T&)` method.
 template<typename T>
-T deserialize_value(std::string_view sv);
+struct value_serializer;
 
 template<>
-inline bool deserialize_value<bool>(std::string_view sv) {
-    return sv == "t" || sv == "true" || sv == "1";
-}
-
+struct value_serializer<bool> {
+    static std::string to_string(bool v) { return v ? "t" : "f"; }
+};
+ 
 template<>
-inline int16_t deserialize_value<int16_t>(std::string_view sv) {
-    return static_cast<int16_t>(std::stoi(std::string(sv)));
-}
-
+struct value_serializer<int16_t> {
+    static std::string to_string(int16_t v) { return std::to_string(v); }
+};
+ 
 template<>
-inline int32_t deserialize_value<int32_t>(std::string_view sv) {
-    return std::stoi(std::string(sv));
-}
-
+struct value_serializer<int32_t> {
+    static std::string to_string(int32_t v) { return std::to_string(v); }
+};
+ 
 template<>
-inline int64_t deserialize_value<int64_t>(std::string_view sv) {
-    return std::stoll(std::string(sv));
-}
-
+struct value_serializer<int64_t> {
+    static std::string to_string(int64_t v) { return std::to_string(v); }
+};
+ 
+// TODO (locale): std::to_string for floats is locale-dependent.
 template<>
-inline float deserialize_value<float>(std::string_view sv) {
-    return std::stof(std::string(sv));
-}
-
+struct value_serializer<float> {
+    static std::string to_string(float v) { return std::to_string(v); }
+};
+ 
 template<>
-inline double deserialize_value<double>(std::string_view sv) {
-    return std::stod(std::string(sv));
-}
-
+struct value_serializer<double> {
+    static std::string to_string(double v) { return std::to_string(v); }
+};
+ 
+// std::string passes through as-is; PQsendQueryParams handles quoting.
 template<>
-inline std::string deserialize_value<std::string>(std::string_view sv) {
-    return std::string(sv);
-}
-
+struct value_serializer<std::string> {
+    static std::string to_string(const std::string& v) { return v; }
+};
+ 
+// pg_uuid → 8-4-4-4-12 lowercase hex
 template<>
-inline pg_uuid deserialize_value<pg_uuid>(std::string_view sv) {
-    // Parse 8-4-4-4-12 hex UUID string.
-    pg_uuid u{};
-    std::size_t byte_idx = 0;
-    for (std::size_t i = 0; i < sv.size() && byte_idx < 16; ++i) {
-        char c = sv[i];
-        if (c == '-') continue;
-        uint8_t hi = 0;
-        if (c >= '0' && c <= '9') hi = c - '0';
-        else if (c >= 'a' && c <= 'f') hi = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') hi = c - 'A' + 10;
-        ++i;
-        char c2 = sv[i];
-        uint8_t lo = 0;
-        if (c2 >= '0' && c2 <= '9') lo = c2 - '0';
-        else if (c2 >= 'a' && c2 <= 'f') lo = c2 - 'a' + 10;
-        else if (c2 >= 'A' && c2 <= 'F') lo = c2 - 'A' + 10;
-        u.bytes[byte_idx++] = static_cast<uint8_t>((hi << 4) | lo);
+struct value_serializer<pg_uuid> {
+    static std::string to_string(const pg_uuid& u) {
+        const auto& b = u.bytes;
+        return std::format(
+            "{:02x}{:02x}{:02x}{:02x}-"
+            "{:02x}{:02x}-{:02x}{:02x}-"
+            "{:02x}{:02x}-"
+            "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7],
+            b[8],b[9], b[10],b[11],b[12],b[13],b[14],b[15]);
     }
-    return u;
-}
-
+};
+ 
+// time_point → ISO 8601 UTC "YYYY-MM-DDTHH:MM:SSZ"
 template<>
-inline std::vector<uint8_t> deserialize_value<std::vector<uint8_t>>(
-    std::string_view sv)
-{
-    // Strip leading "\\x" or "\x".
-    if (sv.size() >= 2 && sv[0] == '\\' && sv[1] == 'x') sv.remove_prefix(2);
-    else if (sv.size() >= 2 && sv[0] == 'x')              sv.remove_prefix(1);
-
-    std::vector<uint8_t> out;
-    out.reserve(sv.size() / 2);
-    for (std::size_t i = 0; i + 1 < sv.size(); i += 2) {
-        uint8_t hi = 0, lo = 0;
-        auto hc = sv[i];
-        auto lc = sv[i+1];
-        if (hc >= '0' && hc <= '9') hi = hc - '0';
-        else if (hc >= 'a' && hc <= 'f') hi = hc - 'a' + 10;
-        else if (hc >= 'A' && hc <= 'F') hi = hc - 'A' + 10;
-        if (lc >= '0' && lc <= '9') lo = lc - '0';
-        else if (lc >= 'a' && lc <= 'f') lo = lc - 'a' + 10;
-        else if (lc >= 'A' && lc <= 'F') lo = lc - 'A' + 10;
-        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+struct value_serializer<std::chrono::system_clock::time_point> {
+    static std::string to_string(
+        const std::chrono::system_clock::time_point& tp)
+    {
+        return std::format("{:%FT%TZ}", tp);
     }
-    return out;
+};
+ 
+// vector<uint8_t> → PostgreSQL hex-escaped bytea "\\xDEADBEEF"
+template<>
+struct value_serializer<std::vector<uint8_t>> {
+    static std::string to_string(const std::vector<uint8_t>& v) {
+        std::string out;
+        out.reserve(2 + v.size() * 2);
+        out += "\\x";
+        for (uint8_t b : v) out += std::format("{:02X}", b);
+        return out;
+    }
+};
+ 
+// ---------------------------------------------------------------------------
+// Deserialization: same class-template pattern for symmetry and ODR safety.
+// Primary template — left undefined. Compiler error = unsupported type.
+// ---------------------------------------------------------------------------
+ 
+template<typename T>
+struct value_deserializer;
+ 
+template<>
+struct value_deserializer<bool> {
+    static bool from_string(std::string_view sv) {
+        return sv == "t" || sv == "true" || sv == "1";
+    }
+};
+ 
+template<>
+struct value_deserializer<int16_t> {
+    static int16_t from_string(std::string_view sv) {
+        return static_cast<int16_t>(std::stoi(std::string(sv)));
+    }
+};
+ 
+template<>
+struct value_deserializer<int32_t> {
+    static int32_t from_string(std::string_view sv) {
+        return std::stoi(std::string(sv));
+    }
+};
+ 
+template<>
+struct value_deserializer<int64_t> {
+    static int64_t from_string(std::string_view sv) {
+        return std::stoll(std::string(sv));
+    }
+};
+ 
+template<>
+struct value_deserializer<float> {
+    static float from_string(std::string_view sv) {
+        return std::stof(std::string(sv));
+    }
+};
+ 
+template<>
+struct value_deserializer<double> {
+    static double from_string(std::string_view sv) {
+        return std::stod(std::string(sv));
+    }
+};
+ 
+template<>
+struct value_deserializer<std::string> {
+    static std::string from_string(std::string_view sv) {
+        return std::string(sv);
+    }
+};
+ 
+template<>
+struct value_deserializer<pg_uuid> {
+    static pg_uuid from_string(std::string_view sv) {
+        pg_uuid u{};
+        std::size_t byte_idx = 0;
+        for (std::size_t i = 0; i < sv.size() && byte_idx < 16; ++i) {
+            if (sv[i] == '-') continue;
+            auto hex = [](char c) -> uint8_t {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return 0;
+            };
+            uint8_t hi = hex(sv[i]);
+            uint8_t lo = hex(sv[++i]);
+            u.bytes[byte_idx++] = static_cast<uint8_t>((hi << 4) | lo);
+        }
+        return u;
+    }
+};
+ 
+template<>
+struct value_deserializer<std::vector<uint8_t>> {
+    static std::vector<uint8_t> from_string(std::string_view sv) {
+        if (sv.size() >= 2 && sv[0] == '\\' && sv[1] == 'x') sv.remove_prefix(2);
+        else if (!sv.empty() && sv[0] == 'x')                 sv.remove_prefix(1);
+        std::vector<uint8_t> out;
+        out.reserve(sv.size() / 2);
+        auto hex = [](char c) -> uint8_t {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return 0;
+        };
+        for (std::size_t i = 0; i + 1 < sv.size(); i += 2)
+            out.push_back(static_cast<uint8_t>((hex(sv[i]) << 4) | hex(sv[i+1])));
+        return out;
+    }
+};
+ 
+template<>
+struct value_deserializer<std::chrono::system_clock::time_point> {
+    static std::chrono::system_clock::time_point from_string(std::string_view sv) {
+        // TODO: implement ISO 8601 UTC parsing.
+        // std::chrono::parse is C++20 but not universally available yet.
+        // Current behaviour: value-initialize (epoch) when parsing fails.
+        (void)sv;
+        return {};
+    }
+};
+ 
+// ---------------------------------------------------------------------------
+// Public forwarding helpers — thin wrappers over the class templates above.
+// These are the functions called by to_params() and from_result().
+// ---------------------------------------------------------------------------
+ 
+template<typename T>
+inline std::string serialize_value(const T& v) {
+    return value_serializer<T>::to_string(v);
+}
+ 
+template<typename T>
+inline T deserialize_value(std::string_view sv) {
+    return value_deserializer<T>::from_string(sv);
 }
 
-template<>
-inline std::chrono::system_clock::time_point
-deserialize_value<std::chrono::system_clock::time_point>(std::string_view sv)
-{
-    // TODO: implement ISO 8601 UTC parsing. std::chrono::parse is C++20 but
-    // not universally available. For now, value-initialize.
-    (void)sv;
-    return std::chrono::system_clock::time_point{};
-}
 
 } // namespace detail
 
@@ -217,9 +272,7 @@ to_params(const Entity& e, const table_t<Entity, Columns...>& table) {
 // ---------------------------------------------------------------------------
 
 template<typename Entity, typename ResultT, typename... Columns>
-[[nodiscard]] Entity
-from_result(const ResultT& res, int row,
-            const table_t<Entity, Columns...>& table)
+[[nodiscard]] Entity from_result(const ResultT& res, int row, const table_t<Entity, Columns...>& table)
 {
     Entity e{};
     int col_idx = 0;
@@ -227,6 +280,7 @@ from_result(const ResultT& res, int row,
         using member_type = typename std::remove_cvref_t<decltype(col)>::member_type;
         auto sv = res.get(row, col_idx++);
         if (sv.has_value()) {
+            // std::move on the temporary is explicit — matches set(Entity&, member_type&&)
             col.set(e, detail::deserialize_value<member_type>(*sv));
         }
         // else: value-initialize (TODO: surface nullopt as an error)

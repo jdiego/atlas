@@ -6,6 +6,7 @@
 #include <boost/ut.hpp>
 #include <cstdlib>
 #include <optional>
+#include <sys/poll.h>
 #include <string>
 #include <string_view>
 
@@ -21,6 +22,18 @@ auto test_conninfo() -> std::optional<std::string> {
         return std::nullopt;
     }
     return std::string{val};
+}
+
+// Wait for the connection socket to become readable or writable based on
+// poll_state. Returns false on timeout (5 s) or poll error.
+auto wait_for_socket(int fd, poll_state state) -> bool {
+    if (state == poll_state::active || fd < 0) {
+        return true;
+    }
+    struct pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = (state == poll_state::reading) ? POLLIN : POLLOUT;
+    return ::poll(&pfd, 1, 5000) > 0;
 }
 
 } // namespace
@@ -213,7 +226,8 @@ ut::suite<"connection/integration/connect"> connect_suite = [] {
         expect(conn.has_value() >> fatal);
 
         auto state = poll_state::writing;
-        for (int i = 0; i < 1000 && state != poll_state::ready; ++i) {
+        while (state != poll_state::ready) {
+            expect(wait_for_socket(conn->socket_fd(), state) >> fatal);
             auto poll = conn->poll_connect();
             expect(poll.has_value() >> fatal);
             state = *poll;
@@ -540,7 +554,8 @@ ut::suite<"connection/integration/reset"> reset_suite = [] {
         expect(conn->reset_start().has_value() >> fatal);
 
         auto state = poll_state::writing;
-        for (int i = 0; i < 1000 && state != poll_state::ready; ++i) {
+        while (state != poll_state::ready) {
+            expect(wait_for_socket(conn->socket_fd(), state) >> fatal);
             auto poll = conn->poll_reset();
             expect(poll.has_value() >> fatal);
             state = *poll;

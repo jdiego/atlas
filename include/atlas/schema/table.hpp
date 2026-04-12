@@ -1,6 +1,5 @@
 #pragma once
 
-// atlas/schema/table.hpp
 //
 // Aggregates columns into a named table descriptor.
 //
@@ -16,21 +15,39 @@
 // name and type information. Also exposed as a free function for ergonomics.
 
 #include <cstddef>
+#include <functional>
+#include <optional>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include "atlas/schema/column.hpp"
 
 namespace atlas {
 
-// Forward-declare the recursive helper so table_t can call it.
 namespace detail {
+template<typename... Columns>
+struct column_ref {
+    using variant_type = std::variant<std::reference_wrapper<const Columns>...>;
 
-template<std::size_t I, typename MemberPtr, typename Entity, typename... Columns>
-constexpr const auto& find_column_impl(
-    const std::tuple<Columns...>& cols, MemberPtr ptr);
+    explicit constexpr column_ref(variant_type column) noexcept
+        : name(std::visit([](const auto& ref) { return ref.get().name; }, column)),
+          column(column) {}
+
+    template<typename Constraint>
+    [[nodiscard]] constexpr auto has_constraint() const noexcept -> bool {
+        return std::visit([](const auto& ref) {
+            return ref.get().template has_constraint<Constraint>();
+        }, column);
+    }
+
+    std::string_view name;
+
+private:
+    variant_type column;
+};
 
 } // namespace detail
 
@@ -47,55 +64,46 @@ struct table_t {
 
     static constexpr std::size_t column_count = sizeof...(Columns);
 
-    // Invoke f(column) for each column in declaration order.
+    // Invoke fn(conlumn) for each column in declaration order.
     template<typename F>
-    constexpr void for_each_column(F&& f) const {
+    constexpr void for_each_column(F&& fn) const {
         std::apply([&](const auto&... col) {
-            (f(col), ...);
+            (fn(col), ...);
         }, columns);
     }
 
-    // Return a const reference to the column whose member_ptr == ptr.
-    // Static-asserts if no column matches (compile-time error).
+    // Return a typed proxy to the column whose member_ptr == ptr.
     template<typename MemberPtr>
-    constexpr const auto& find_column(MemberPtr ptr) const {
-        return detail::find_column_impl<0>(columns, ptr);
+    [[nodiscard]] constexpr auto find_column(MemberPtr ptr) const {
+        using result_type = detail::column_ref<Columns...>;
+        std::optional<typename result_type::variant_type> found;
+
+        std::apply([&](const auto&... col) {
+            ([&] {
+                if constexpr (std::is_same_v<decltype(col.member_ptr), MemberPtr>) {
+                    if (!found && col.member_ptr == ptr) {
+                        found.emplace(std::cref(col));
+                    }
+                }
+            }(), ...);
+        }, columns);
+
+        if (!found) {
+            throw "find_column: member pointer not found in this table";
+        }
+
+        return result_type{*found};
     }
 };
 
 // ---------------------------------------------------------------------------
-// Detail: recursive column search
+// Free function overload — delegates to member for ergonomics.
 // ---------------------------------------------------------------------------
-
-namespace detail {
-
-template<std::size_t I, typename MemberPtr, typename ColTuple>
-constexpr const auto& find_column_impl(const ColTuple& cols, MemberPtr ptr) {
-    constexpr std::size_t N = std::tuple_size_v<ColTuple>;
-    if constexpr (I >= N) {
-        static_assert(I < N,
-            "find_column: member pointer not found in table");
-        // Unreachable — satisfies return type requirement.
-        return std::get<0>(cols);
-    } else {
-        const auto& col = std::get<I>(cols);
-        if constexpr (std::is_same_v<decltype(col.member_ptr), MemberPtr>) {
-            if (col.member_ptr == ptr) {
-                return col;
-            }
-        }
-        return find_column_impl<I + 1>(cols, ptr);
-    }
-}
-
-} // namespace detail
-
-// Free function overload — delegates to the member for ergonomics.
+ 
 template<typename Entity, typename... Columns, typename MemberPtr>
-constexpr const auto& find_column(
-    const table_t<Entity, Columns...>& tbl, MemberPtr ptr)
+[[nodiscard]] constexpr auto find_column(const table_t<Entity, Columns...>& tbl, MemberPtr ptr)
 {
-    return detail::find_column_impl<0>(tbl.columns, ptr);
+    return tbl.find_column(ptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -103,15 +111,10 @@ constexpr const auto& find_column(
 // ---------------------------------------------------------------------------
 
 template<typename Entity, typename... Columns>
-constexpr auto make_table(std::string_view name, Columns&&... cols)
-    -> table_t<Entity, std::remove_cvref_t<Columns>...>
+constexpr auto make_table(std::string_view name, Columns&&... cols) -> table_t<Entity, std::remove_cvref_t<Columns>...>
 {
-    static_assert((is_column<Columns> && ...),
-        "make_table: all arguments after name must satisfy is_column");
-    return {
-        name,
-        std::tuple<std::remove_cvref_t<Columns>...>(std::forward<Columns>(cols)...)
-    };
+    static_assert((is_column<Columns> && ...), "all arguments after name must satisfy is_column");
+    return { name, std::tuple<std::remove_cvref_t<Columns>...>(std::forward<Columns>(cols)...)};
 }
 
 // ---------------------------------------------------------------------------

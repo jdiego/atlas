@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25...4.2)
 
 set(MODULE_NAME atlas)
-set(TEST_SUITE altas_test_suite)
+set(TEST_SUITE atlas_test_suite)
 
 project(${TEST_SUITE} LANGUAGES CXX)
 
@@ -37,7 +37,7 @@ endif()
 # ######################################################################################################################
 # Adding unit test files
 # ######################################################################################################################
-file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 verbose_message("Adding ${TEST_SOURCES} to ${TEST_SUITE} test suite.")
 
 # ######################################################################################################################

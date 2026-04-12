@@ -1,7 +1,5 @@
 #pragma once
 
-// atlas/schema/ddl.hpp
-//
 // Generates CREATE TABLE SQL from a table_t descriptor.
 //
 // Column clause ordering within each column definition:
@@ -74,36 +72,41 @@ std::string column_def(const ColT& col, StoragePtr storage_ptr) {
     if constexpr (ColT::template has_constraint<unique_t>()) {
         line += " UNIQUE";
     }
-    if constexpr (ColT::template has_constraint<default_value_t<member_type>>()) {
-        const auto& dv = col.template get_constraint<default_value_t<member_type>>();
-        line += " DEFAULT ";
-        line += format_default(dv.value);
-    }
-
-    // REFERENCES clause — resolved only when storage is provided.
-    // We detect references_t by scanning the constraints tuple.
-    auto emit_references = [&]<typename C>(const C& constraint) {
-        if constexpr (is_references<C>) {
-            if constexpr (std::is_null_pointer_v<StoragePtr>) {
-                // No storage — emit a placeholder so the SQL is still parseable
-                // as a comment; developers should pass storage for full DDL.
-                line += " /* TODO: REFERENCES unresolved — pass storage to create_table_sql */";
-            } else {
-                // Resolve the referenced table and column names at compile time.
-                using ref_entity = typename std::remove_cvref_t<C>::ref_entity_type;
-                const auto& ref_table  = storage_ptr->template get_table<ref_entity>();
-                const auto& ref_col    = find_column(ref_table, constraint.column_ptr);
-                line += " REFERENCES ";
-                line += ref_table.name;
-                line += '(';
-                line += ref_col.name;
-                line += ')';
+    // Scan constraints for any default_value_t<T>, regardless of T.
+    // This avoids the type-mismatch bug where default_value(0) on a double
+    // column would be silently skipped because T=int != member_type=double.
+    std::apply([&](const auto&... constraint) {
+        ([&] {
+            using Constraint = std::remove_cvref_t<decltype(constraint)>;
+            if constexpr (is_default_value<Constraint>) {
+                line += " DEFAULT ";
+                line += format_default(constraint.value);
             }
-        }
-    };
+        }(), ...);
+    }, col.constraints);
 
-    std::apply([&](const auto&... c) {
-        (emit_references(c), ...);
+    // Scan constraints for any references_t<RefEntity, RefMemberPtr>.
+    std::apply([&](const auto&... constraint) {
+        ([&] {
+            using Constraint = std::remove_cvref_t<decltype(constraint)>;
+            if constexpr (is_references<Constraint>) {
+                if constexpr (std::is_null_pointer_v<StoragePtr>) {
+                    // No storage provided — emit a placeholder comment.
+                    // Pass a storage instance to create_table_sql() to resolve.
+                    line += " /* TODO: REFERENCES unresolved — pass storage to create_table_sql */";
+                } 
+                else {
+                    using ref_entity = typename Constraint::ref_entity_type;
+                    const auto& ref_table = storage_ptr->template get_table<ref_entity>();
+                    const auto& ref_col   = find_column(ref_table, constraint.column_ptr);
+                    line += " REFERENCES ";
+                    line += ref_table.name;
+                    line += '(';
+                    line += ref_col.name;
+                    line += ')';
+                }
+            }
+        }(), ...);
     }, col.constraints);
 
     return line;
@@ -140,8 +143,7 @@ create_table_sql(const table_t<Entity, Columns...>& table) {
 
 template<typename Entity, typename... Columns, typename... Tables>
 [[nodiscard]] std::string
-create_table_sql(const table_t<Entity, Columns...>& table,
-                 const storage_t<Tables...>& storage)
+create_table_sql(const table_t<Entity, Columns...>& table, const storage_t<Tables...>& storage)
 {
     std::string sql;
     sql += "CREATE TABLE IF NOT EXISTS ";

@@ -13,7 +13,7 @@ namespace atlas::pg {
 
 namespace detail {
 
-struct result_access;
+struct result_handle_adopter;
 
 } // namespace detail
 
@@ -53,7 +53,8 @@ private:
     std::unique_ptr<impl> impl_ {};
 
     friend class connection;
-    friend struct detail::result_access;
+    // Keeps libpq ownership details private while allowing internal construction.
+    friend struct detail::result_handle_adopter;
 };
 
 } // namespace atlas::pg

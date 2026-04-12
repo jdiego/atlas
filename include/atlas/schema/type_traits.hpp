@@ -1,6 +1,5 @@
 #pragma once
 
-// atlas/schema/type_traits.hpp
 //
 // Maps C++ types to PostgreSQL SQL type names and OIDs.
 // This header is purely compile-time metadata — no I/O, no libpq calls.

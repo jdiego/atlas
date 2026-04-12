@@ -1,5 +1,5 @@
 #include "atlas/pg/result.hpp"
-#include "detail/result_access.hpp"
+#include "detail/result_handle_adopter.hpp"
 
 #include <libpq-fe.h>
 
@@ -245,7 +245,7 @@ auto result::column_type(std::size_t col) const -> std::expected<oid, error> {
     return static_cast<oid>(PQftype(impl_->handle.get(), *column_index));
 }
 
-auto detail::result_access::make(result_handle handle) -> result {
+auto detail::result_handle_adopter::make(result_handle handle) -> result {
     return result {std::make_unique<result::impl>(std::move(handle))};
 }
 
