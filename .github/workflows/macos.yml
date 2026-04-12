@@ -42,7 +42,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake --build build --config $BUILD_TYPE
+          cmake --build build --config $BUILD_TYPE -j$(nproc)
           
       - name: Test
         run: ctest --test-dir build -C $BUILD_TYPE --output-on-failure
