@@ -1,6 +1,4 @@
 #pragma once
-
-// atlas/schema/constraints.hpp
 //
 // Tag types representing SQL column constraints.
 //

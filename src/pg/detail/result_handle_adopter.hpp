@@ -5,7 +5,8 @@
 
 namespace atlas::pg::detail {
 
-struct result_access {
+// Adopts a validated libpq result handle into the public result wrapper.
+struct result_handle_adopter {
     [[nodiscard]] static auto make(result_handle handle) -> result;
 };
 

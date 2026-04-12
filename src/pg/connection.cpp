@@ -1,5 +1,5 @@
 #include "atlas/pg/connection.hpp"
-#include "detail/result_access.hpp"
+#include "detail/result_handle_adopter.hpp"
 
 #include <libpq-fe.h>
 
@@ -237,7 +237,7 @@ struct connection::impl {
 
         detail::result_handle result_handle{raw};
         if (is_success_status(PQresultStatus(result_handle.get()))) {
-            return detail::result_access::make(std::move(result_handle));
+            return detail::result_handle_adopter::make(std::move(result_handle));
         }
 
         return std::unexpected(make_result_error(result_handle.get()));
@@ -568,22 +568,22 @@ auto connection::poll_reset() -> std::expected<poll_state, error> {
     }
 
     switch (PQresetPoll(*handle)) {
-    case PGRES_POLLING_READING:
-        return poll_state::reading;
-    case PGRES_POLLING_WRITING:
-        return poll_state::writing;
-    case PGRES_POLLING_ACTIVE:
-        return poll_state::active;
-    case PGRES_POLLING_OK: {
-        auto nonblocking = impl_->ensure_nonblocking();
-        if (!nonblocking) {
-            return std::unexpected(std::move(nonblocking.error()));
+        case PGRES_POLLING_READING:
+            return poll_state::reading;
+        case PGRES_POLLING_WRITING:
+            return poll_state::writing;
+        case PGRES_POLLING_ACTIVE:
+            return poll_state::active;
+        case PGRES_POLLING_OK: {
+            auto nonblocking = impl_->ensure_nonblocking();
+            if (!nonblocking) {
+                return std::unexpected(std::move(nonblocking.error()));
+            }
+            return poll_state::ready;
         }
-        return poll_state::ready;
-    }
-    case PGRES_POLLING_FAILED:
-        return std::unexpected(make_connection_error(*handle));
-    }
+        case PGRES_POLLING_FAILED:
+            return std::unexpected(make_connection_error(*handle));
+        }
 
     return std::unexpected(make_connection_error(*handle, "libpq returned an unknown reset state"));
 }

@@ -1,6 +1,4 @@
 #pragma once
-
-// atlas/schema/column.hpp
 //
 // Represents a single mapped column as a compile-time object.
 //
@@ -73,7 +71,7 @@ struct column_t {
     }
 
     // Write the mapped member to an entity instance.
-    constexpr void set(Entity& e, member_type v) const noexcept {
+    constexpr void set(Entity& e, member_type&& v) const noexcept {
         e.*member_ptr = std::move(v);
     }
 };
