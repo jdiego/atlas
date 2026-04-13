@@ -21,28 +21,76 @@ namespace atlas {
 // ColRef is always column_ref<Entity, T>; Rhs is literal<V> or column_ref.
 // ---------------------------------------------------------------------------
 
-template<typename ColRef, typename Rhs> struct eq_expr   { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct ne_expr   { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct lt_expr   { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct gt_expr   { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct lte_expr  { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct gte_expr  { ColRef lhs; Rhs rhs; };
-template<typename ColRef, typename Rhs> struct like_expr { ColRef lhs; Rhs rhs; };
+template <typename ColRef, typename Rhs>
+struct eq_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct ne_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct lt_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct gt_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct lte_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct gte_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
+template <typename ColRef, typename Rhs>
+struct like_expr {
+    ColRef lhs;
+    Rhs rhs;
+};
 
-template<typename ColRef> struct is_null_expr     { ColRef col; };
-template<typename ColRef> struct is_not_null_expr { ColRef col; };
+template <typename ColRef>
+struct is_null_expr {
+    ColRef col;
+};
+template <typename ColRef>
+struct is_not_null_expr {
+    ColRef col;
+};
 
 // Container is expected to be e.g. std::vector<T> or std::initializer_list<T>.
-template<typename ColRef, typename Container>
-struct in_expr { ColRef col; Container values; };
+template <typename ColRef, typename Container>
+struct in_expr {
+    ColRef col;
+    Container values;
+};
 
 // ---------------------------------------------------------------------------
 // Boolean combinators
 // ---------------------------------------------------------------------------
 
-template<typename L, typename R> struct and_expr { L lhs; R rhs; };
-template<typename L, typename R> struct or_expr  { L lhs; R rhs; };
-template<typename P>             struct not_expr  { P inner; };
+template <typename L, typename R>
+struct and_expr {
+    L lhs;
+    R rhs;
+};
+template <typename L, typename R>
+struct or_expr {
+    L lhs;
+    R rhs;
+};
+template <typename P>
+struct not_expr {
+    P inner;
+};
 
 // ---------------------------------------------------------------------------
 // Concept: is_predicate
@@ -50,72 +98,77 @@ template<typename P>             struct not_expr  { P inner; };
 
 namespace detail {
 
-template<typename T> struct is_predicate_impl : std::false_type {};
+template <typename T>
+struct is_predicate_impl : std::false_type {};
 
-template<typename C, typename R> struct is_predicate_impl<eq_expr<C,R>>       : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<ne_expr<C,R>>       : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<lt_expr<C,R>>       : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<gt_expr<C,R>>       : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<lte_expr<C,R>>      : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<gte_expr<C,R>>      : std::true_type {};
-template<typename C, typename R> struct is_predicate_impl<like_expr<C,R>>     : std::true_type {};
-template<typename C>             struct is_predicate_impl<is_null_expr<C>>     : std::true_type {};
-template<typename C>             struct is_predicate_impl<is_not_null_expr<C>> : std::true_type {};
-template<typename C, typename V> struct is_predicate_impl<in_expr<C,V>>        : std::true_type {};
-template<typename L, typename R> struct is_predicate_impl<and_expr<L,R>>       : std::true_type {};
-template<typename L, typename R> struct is_predicate_impl<or_expr<L,R>>        : std::true_type {};
-template<typename P>             struct is_predicate_impl<not_expr<P>>          : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<eq_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<ne_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<lt_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<gt_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<lte_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<gte_expr<C, R>> : std::true_type {};
+template <typename C, typename R>
+struct is_predicate_impl<like_expr<C, R>> : std::true_type {};
+template <typename C>
+struct is_predicate_impl<is_null_expr<C>> : std::true_type {};
+template <typename C>
+struct is_predicate_impl<is_not_null_expr<C>> : std::true_type {};
+template <typename C, typename V>
+struct is_predicate_impl<in_expr<C, V>> : std::true_type {};
+template <typename L, typename R>
+struct is_predicate_impl<and_expr<L, R>> : std::true_type {};
+template <typename L, typename R>
+struct is_predicate_impl<or_expr<L, R>> : std::true_type {};
+template <typename P>
+struct is_predicate_impl<not_expr<P>> : std::true_type {};
 
 } // namespace detail
 
-template<typename P>
+template <typename P>
 concept is_predicate = detail::is_predicate_impl<std::remove_cvref_t<P>>::value;
 
 // ---------------------------------------------------------------------------
 // Factory: eq
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto eq(T Entity::* col, V&& val)
-    -> eq_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto eq(T Entity::*col, V &&val) -> eq_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
-     * IMPLEMENTATION GUIDE:
+     * Builds an equality predicate node representing "col = val".
+     * The right-hand side is normalised to literal<std::remove_cvref_t<V>>,
+     * so the payload is always stored as an owning value type.
      *
-     * What this function does:
-     *   Builds an eq_expr node representing "col = val".
+     * Preconditions:
+     *   - col refers to a mapped data member.
+     *   - V must be storable in literal<std::remove_cvref_t<V>> and later
+     *     serialisable by the SQL serialisation layer.
      *
-     * Step 1 — Construct lhs = column_ref<Entity, T>{col}.
-     * Step 2 — Construct rhs = literal<std::remove_cvref_t<V>>{std::forward<V>(val)}.
-     * Step 3 — Return eq_expr<...>{lhs, rhs}.
+     * Postconditions:
+     *   - Returned node stores the member pointer in lhs.ptr.
+     *   - Returned node stores val by value in rhs.value.
      *
      * Key types involved:
      *   - column_ref<Entity, T>: the left-hand column reference.
      *   - literal<V>: the right-hand bound parameter.
      *
-     * Preconditions:
-     *   - col is a valid non-null member pointer.
-     *   - V must be serialisable via detail::value_serializer<V>::to_string().
-     *
-     * Postconditions:
-     *   - Returned node carries lhs.ptr == col and rhs.value == val.
-     *
      * Pitfalls:
      *   - Forward val, do not copy twice.
-     *
-     * Hint:
-     *   return {column_ref<Entity,T>{col}, literal<std::remove_cvref_t<V>>{std::forward<V>(val)}};
      */
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: ne
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto ne(T Entity::* col, V&& val)
-    -> ne_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto ne(T Entity::*col, V &&val) -> ne_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -126,16 +179,15 @@ constexpr auto ne(T Entity::* col, V&& val)
      *
      * Hint: return {column_ref<Entity,T>{col}, literal<std::remove_cvref_t<V>>{std::forward<V>(val)}};
      */
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: lt
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto lt(T Entity::* col, V&& val)
-    -> lt_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto lt(T Entity::*col, V &&val) -> lt_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -146,16 +198,15 @@ constexpr auto lt(T Entity::* col, V&& val)
      *
      * Hint: identical pattern to eq().
      */
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: gt
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto gt(T Entity::* col, V&& val)
-    -> gt_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto gt(T Entity::*col, V &&val) -> gt_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -166,16 +217,16 @@ constexpr auto gt(T Entity::* col, V&& val)
      *
      * Hint: identical pattern to eq().
      */
+
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: lte
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto lte(T Entity::* col, V&& val)
-    -> lte_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto lte(T Entity::*col, V &&val) -> lte_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -184,16 +235,16 @@ constexpr auto lte(T Entity::* col, V&& val)
      *
      * Hint: identical pattern to eq().
      */
+
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: gte
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto gte(T Entity::* col, V&& val)
-    -> gte_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto gte(T Entity::*col, V &&val) -> gte_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -202,16 +253,16 @@ constexpr auto gte(T Entity::* col, V&& val)
      *
      * Hint: identical pattern to eq().
      */
+
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: like
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename V>
-constexpr auto like(T Entity::* col, V&& val)
-    -> like_expr<column_ref<Entity, T>, literal<std::remove_cvref_t<V>>>
-{
+template <typename Entity, typename T, typename V>
+constexpr auto like(T Entity::*col, V &&val) -> like_expr<column_ref<Entity, T>, literal_operand_t<V>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -226,16 +277,15 @@ constexpr auto like(T Entity::* col, V&& val)
      *
      * Hint: identical pattern to eq().
      */
+    return {atlas::col(col), atlas::lit(std::forward<V>(val))};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: is_null
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T>
-constexpr auto is_null(T Entity::* col)
-    -> is_null_expr<column_ref<Entity, T>>
-{
+template <typename Entity, typename T>
+constexpr auto is_null(T Entity::*col) -> is_null_expr<column_ref<Entity, T>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -250,19 +300,16 @@ constexpr auto is_null(T Entity::* col)
      * Postconditions:
      *   - No parameter placeholder is emitted; IS NULL takes no bound value.
      *
-     * Hint:
-     *   return {column_ref<Entity, T>{col}};
      */
+    return {atlas::col(col)};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: is_not_null
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T>
-constexpr auto is_not_null(T Entity::* col)
-    -> is_not_null_expr<column_ref<Entity, T>>
-{
+template <typename Entity, typename T>
+constexpr auto is_not_null(T Entity::*col) -> is_not_null_expr<column_ref<Entity, T>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -271,16 +318,15 @@ constexpr auto is_not_null(T Entity::* col)
      *
      * Hint: mirror is_null() exactly, changing the return type.
      */
+    return {atlas::col(col)};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: in
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename T, typename Container>
-constexpr auto in(T Entity::* col, Container&& vals)
-    -> in_expr<column_ref<Entity, T>, std::remove_cvref_t<Container>>
-{
+template <typename Entity, typename T, typename Container>
+constexpr auto in(T Entity::*col, Container &&vals) -> in_expr<column_ref<Entity, T>, std::remove_cvref_t<Container>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -309,16 +355,15 @@ constexpr auto in(T Entity::* col, Container&& vals)
      * Hint:
      *   return {column_ref<Entity,T>{col}, std::forward<Container>(vals)};
      */
+    return {atlas::col(col), std::forward<Container>(vals)};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: and_
 // ---------------------------------------------------------------------------
 
-template<typename L, typename R>
-constexpr auto and_(L&& l, R&& r)
-    -> and_expr<std::remove_cvref_t<L>, std::remove_cvref_t<R>>
-{
+template <typename L, typename R>
+constexpr auto and_(L &&lhs, R &&rhs) -> and_expr<std::remove_cvref_t<L>, std::remove_cvref_t<R>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -340,16 +385,15 @@ constexpr auto and_(L&& l, R&& r)
      * Hint:
      *   return {std::forward<L>(l), std::forward<R>(r)};
      */
+    return {std::forward<L>(lhs), std::forward<R>(rhs)};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: or_
 // ---------------------------------------------------------------------------
 
-template<typename L, typename R>
-constexpr auto or_(L&& l, R&& r)
-    -> or_expr<std::remove_cvref_t<L>, std::remove_cvref_t<R>>
-{
+template <typename L, typename R>
+constexpr auto or_(L &&lhs, R &&rhs) -> or_expr<std::remove_cvref_t<L>, std::remove_cvref_t<R>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -359,16 +403,15 @@ constexpr auto or_(L&& l, R&& r)
      *
      * Hint: mirror and_() exactly; only the return type differs.
      */
+    return {std::forward<L>(lhs), std::forward<R>(rhs)};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: not_
 // ---------------------------------------------------------------------------
 
-template<typename P>
-constexpr auto not_(P&& p)
-    -> not_expr<std::remove_cvref_t<P>>
-{
+template <typename P>
+constexpr auto not_(P &&predicate) -> not_expr<std::remove_cvref_t<P>> {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -376,11 +419,12 @@ constexpr auto not_(P&& p)
      *   Wraps a predicate in a not_expr, producing "NOT (inner)" when
      *   serialised.
      *
-     * Step 1 — Forward p into not_expr{p}.
+     * Step 1 — Forward predicate into not_expr{predicate}.
      *
      * Hint:
      *   return {std::forward<P>(p)};
      */
+    return {std::forward<P>(predicate)};
 }
 
 } // namespace atlas

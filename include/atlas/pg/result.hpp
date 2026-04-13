@@ -34,10 +34,8 @@ public:
     [[nodiscard]] auto rows() const noexcept -> std::size_t;
     [[nodiscard]] auto columns() const noexcept -> std::size_t;
     [[nodiscard]] auto is_null(std::size_t row, std::size_t col) const -> std::expected<bool, error>;
-    [[nodiscard]] auto field(std::size_t row, std::size_t col) const
-        -> std::expected<std::optional<std::string_view>, error>;
-    [[nodiscard]] auto get(std::size_t row, std::size_t col) const
-        -> std::expected<std::optional<std::string_view>, error>;
+    [[nodiscard]] auto field(std::size_t row, std::size_t col) const -> std::expected<std::optional<std::string_view>, error>;
+    [[nodiscard]] auto get(std::size_t row, std::size_t col) const -> std::expected<std::optional<std::string_view>, error>;
     [[nodiscard]] auto status() const noexcept -> result_status;
     [[nodiscard]] auto error_message() const noexcept -> std::string_view;
     [[nodiscard]] auto column_type(std::size_t col) const -> std::expected<oid, error>;
