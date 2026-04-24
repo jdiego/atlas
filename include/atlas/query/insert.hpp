@@ -189,7 +189,7 @@ struct insert_query_impl {
             first = false;
         };
 
-        //cStep 2 — Determine the column list and VALUES placeholder list:
+        //Step 2 — Determine the column list and VALUES placeholder list:
         if (full_object_mode) {
             // Full-object mode: iterate all columns via table.for_each_column()
             // and append each value through serialize_context::next_param().
