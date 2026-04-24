@@ -602,21 +602,23 @@ constexpr auto select(Args &&...args)
 {
     /*
      * What this function does:
-     *   Creates an empty select_query with the given column/aggregate
-     *   references.  Raw member pointers are wrapped in column_ref via
-     *   detail::normalize_select_col; aggregate nodes pass through unchanged.
+     *   Creates an empty select_query with the given select expressions.
+     *   Raw member pointers are wrapped in column_ref via
+     *   detail::normalize_select_col; aggregate nodes and all_columns_t<...>
+     *   markers pass through unchanged.
      *
      * Key types involved:
-     *   - detail::normalize_select_col: adapter that handles both raw member
-     *     pointers and aggregate/column_ref types uniformly.
+     *   - detail::normalize_select_col: adapter that handles raw member
+     *     pointers, aggregate/column_ref types, and all_columns_t<...>
+     *     markers uniformly.
      *
      * Preconditions:
      *   - At least one argument must be provided.
-     *   - Each argument must be either a member pointer or an is_aggregate
-     *     or is_column_ref type.
+     *   - Each argument must be either a member pointer, an is_aggregate
+     *     type, an is_column_ref type, or an all_columns_t<...> marker.
      *
      * Postconditions:
-     *   - Returned select_query carries all provided column/aggregate refs.
+     *   - Returned select_query carries all provided select expressions.
      *
      * Pitfalls:
      *   - Do not call normalize_select_col twice; compute the tuple in one pass.
