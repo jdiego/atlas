@@ -375,34 +375,38 @@ struct select_query_impl {
 
         serialize_context ctx{};
         std::string sql = "SELECT ";
-        bool first_select = true;
+        static_assert(std::tuple_size_v<Selected> > 0,
+            "select_query::to_sql() requires at least one selected expression");
         // `selected` is a heterogeneous tuple of SELECT expressions
         // (`column_ref` and aggregate nodes). `std::apply` expands that tuple
         // in declaration order so each element can be serialized without type
         // erasure. `append_select` then uses `if constexpr` to dispatch at
         // compile time to `serialize_column_ref()` or `serialize_aggregate()`,
         // inserting ", " between items as needed.
-        std::apply([&](const auto &...exprs) {
-            auto append_select = [&](const auto &expr) {
-                using Expr = std::remove_cvref_t<decltype(expr)>;
-                if (!first_select) {
-                    sql += ", ";
-                }
-                if constexpr (is_aggregate<Expr>) {
-                    sql += serialize_aggregate(expr, db);
-                } 
-                else if constexpr (is_column_ref<Expr>) {
-                    sql += serialize_column_ref(expr, db);
-                } 
-                else {
-                    static_assert(detail::always_false<Expr>, "select_query::to_sql(): unsupported SELECT expression");
-                }
+        if constexpr (std::tuple_size_v<Selected> > 0) {
+            bool first_select = true;
+            std::apply([&](const auto &...exprs) {
+                auto append_select = [&](const auto &expr) {
+                    using Expr = std::remove_cvref_t<decltype(expr)>;
+                    if (!first_select) {
+                        sql += ", ";
+                    }
+                    if constexpr (is_aggregate<Expr>) {
+                        sql += serialize_aggregate(expr, db);
+                    } 
+                    else if constexpr (is_column_ref<Expr>) {
+                        sql += serialize_column_ref(expr, db);
+                    } 
+                    else {
+                        static_assert(detail::always_false<Expr>, "select_query::to_sql(): unsupported SELECT expression");
+                    }
 
-                first_select = false;
-            };
+                    first_select = false;
+                };
 
-            (append_select(exprs), ...);
-        }, selected);
+                (append_select(exprs), ...);
+            }, selected);
+        }
         // Resolve the FROM table once; its metadata drives both the clause
         // itself and the default alias fallback used by column serialization.
         const auto &from_table = db.template get_table<FromEntity>();
@@ -413,40 +417,41 @@ struct select_query_impl {
 
         // Emit JOINs before WHERE so placeholders produced by ON predicates
         // occupy the leading slots in ctx, matching params() traversal order.
-        std::apply([&](const auto &...join_nodes) {
-            auto append_join = [&](const auto &join_node) {
-                using Join = std::remove_cvref_t<decltype(join_node)>;
-                using JoinEntity = typename Join::rhs_entity_type;
-                using JoinTag = typename Join::tag_type;
-                const auto& join_table = db.template get_table<JoinEntity>();
+        if constexpr (std::tuple_size_v<Joins> > 0) {
+            std::apply([&](const auto &...join_nodes) {
+                auto append_join = [&](const auto &join_node) {
+                    using Join = std::remove_cvref_t<decltype(join_node)>;
+                    using JoinEntity = typename Join::rhs_entity_type;
+                    using JoinTag = typename Join::tag_type;
+                    const auto& join_table = db.template get_table<JoinEntity>();
 
-                sql += " ";
-                if constexpr (Join::kind == join_kind::inner) {
-                    sql += "INNER JOIN ";
-                } 
-                else if constexpr (Join::kind == join_kind::left) {
-                    sql += "LEFT JOIN ";
-                } 
-                else if constexpr (Join::kind == join_kind::right) {
-                    sql += "RIGHT JOIN ";
-                } 
-                else if constexpr (Join::kind == join_kind::full) {
-                    sql += "FULL JOIN ";
-                } 
-                else {
-                    static_assert(detail::always_false<Join>, "select_query::to_sql(): unsupported join kind");
-                }
+                    sql += " ";
+                    if constexpr (Join::kind == join_kind::inner) {
+                        sql += "INNER JOIN ";
+                    } 
+                    else if constexpr (Join::kind == join_kind::left) {
+                        sql += "LEFT JOIN ";
+                    } 
+                    else if constexpr (Join::kind == join_kind::right) {
+                        sql += "RIGHT JOIN ";
+                    } 
+                    else if constexpr (Join::kind == join_kind::full) {
+                        sql += "FULL JOIN ";
+                    } 
+                    else {
+                        static_assert(detail::always_false<Join>, "select_query::to_sql(): unsupported join kind");
+                    }
 
-                sql += join_table.name;
-                sql += " ";
-                sql += alias_for.template operator()<JoinTag>(join_table.name);
-                sql += " ON ";
-                sql += serialize_predicate(join_node.on, db, ctx);
-            };
+                    sql += join_table.name;
+                    sql += " ";
+                    sql += alias_for.template operator()<JoinTag>(join_table.name);
+                    sql += " ON ";
+                    sql += serialize_predicate(join_node.on, db, ctx);
+                };
 
-            (append_join(join_nodes), ...);
-        }, joins);
-
+                (append_join(join_nodes), ...);
+            }, joins);
+        }
         // WHERE reuses predicate serialization so SQL emission and parameter
         // collection stay coupled through the same ctx state.
         if constexpr (!std::is_same_v<WherePred, std::monostate>) {
@@ -600,6 +605,9 @@ constexpr auto select(Args &&...args) -> select_query<decltype(detail::normalize
      *       {}, {}, {}, {}, std::nullopt, std::nullopt
      *   };
      */
+    static_assert(sizeof...(Args) > 0,
+        "atlas::select() requires at least one column or aggregate");
+
     return {
         std::make_tuple(detail::normalize_select_col(std::forward<Args>(args))...),
         {},

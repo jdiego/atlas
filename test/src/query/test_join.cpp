@@ -69,7 +69,7 @@ ut::suite<"query/join"> join_suite = [] {
 
         atlas::join_clause<Post, on_pred_t, atlas::join_kind::inner> jc{on_pred};
 
-        static_assert(jc.kind == atlas::join_kind::inner);
+        static_assert(std::remove_cvref_t<decltype(jc)>::kind == atlas::join_kind::inner);
         expect(jc.on.lhs.ptr == &Post::user_id);
         expect(jc.on.rhs.ptr == &User::id);
     };
@@ -86,7 +86,7 @@ ut::suite<"query/join"> join_suite = [] {
             }
         };
 
-        static_assert(jc.kind == atlas::join_kind::left);
+        static_assert(std::remove_cvref_t<decltype(jc)>::kind == atlas::join_kind::left);
         expect(true);
     };
 
@@ -122,7 +122,7 @@ ut::suite<"query/join"> join_suite = [] {
         static_assert(std::tuple_size_v<decltype(q.joins)> == 1u);
 
         const auto& jc = std::get<0>(q.joins);
-        static_assert(jc.kind == atlas::join_kind::inner);
+        static_assert(std::remove_cvref_t<decltype(jc)>::kind == atlas::join_kind::inner);
         expect(jc.on.lhs.ptr == &Post::user_id);
     };
 
@@ -151,7 +151,7 @@ ut::suite<"query/join"> join_suite = [] {
             .left_join<Post>(atlas::eq(&Post::user_id, &User::id));
 
         const auto& jc = std::get<0>(q.joins);
-        static_assert(jc.kind == atlas::join_kind::left);
+        static_assert(std::remove_cvref_t<decltype(jc)>::kind == atlas::join_kind::left);
         expect(true);
     };
 
