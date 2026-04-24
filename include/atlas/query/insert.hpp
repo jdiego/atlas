@@ -219,43 +219,25 @@ struct insert_query_impl {
         }
 
         // Step 3 — Build "INSERT INTO <table> (<cols>) VALUES (<params>)".
-        params_cache = std::move(ctx.params);
         return "INSERT INTO " + std::string(table.name) + " (" + cols + ") VALUES (" + vals + ")";
     }
 
     // -----------------------------------------------------------------------
-    // .params()
+    // .params(db)
     // -----------------------------------------------------------------------
-    [[nodiscard]] std::vector<std::string> params() const
+    template<typename... Tables>
+    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...>& db) const
     {
         /*
-         * What this function does:
-         *   Returns the parameter value strings corresponding to the $N
-         *   placeholders in to_sql().
-         *
+         * Returns the parameter value strings corresponding to the $N
+         * placeholders in to_sql(db). Full-object mode requires db to walk
+         * table columns in declaration order; partial mode ignores db.
          */
         if (full_object_mode) {
-            return params_cache.value_or(std::vector<std::string>{});
+            const auto& table = db.template get_table<Entity>();
+            return to_params(*entity_val, table);
         }
 
-        return build_partial_params();
-    }
-private:
-    [[nodiscard]] std::vector<std::string> build_partial_params() const {
-        /*
-         * What this function does:
-         *   Collects the partial-insert literal values in SET call order.
-         *
-         * Key types involved:
-         *   - serialize_context: manages the params vector.
-         *   - detail::serialize_value<T>: converts each literal to text.
-         *
-         * Preconditions:
-         *   - full_object_mode == false.
-         *
-         * Postconditions:
-         *   - Returns the vector of parameter strings in placeholder order.
-         */
         serialize_context ctx{};
         std::apply([&](const auto&... clauses) {
             (ctx.next_param(detail::serialize_value(clauses.val.value)), ...);

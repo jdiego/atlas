@@ -158,7 +158,7 @@ ut::suite<"query/aggregate"> aggregate_suite = [] {
                       .where(atlas::gt(&User::age, 18));
 
         std::string sql = q.to_sql(db);
-        auto prm        = q.params();
+        auto prm        = q.params(db);
 
         expect(sql == "SELECT COUNT(*) FROM users u WHERE u.age > $1");
         expect(prm == std::vector<std::string>{"18"});

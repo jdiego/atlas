@@ -161,15 +161,18 @@ struct update_query_impl {
     }
 
     // -----------------------------------------------------------------------
-    // .params()
+    // .params(db)
     // -----------------------------------------------------------------------
-    [[nodiscard]] std::vector<std::string> params() const
+    template<typename... Tables>
+    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...>&) const
     {
         /*
          * Returns the parameter list corresponding to the generated SQL.
          * Guarantees:
          *   - Ordering matches placeholder numbering ($1, $2, ...).
          *   - Includes both SET values and WHERE predicate values.
+         * db is accepted for API symmetry with to_sql(db); not used here
+         * because all values are literals stored in the builder.
          */
         serialize_context ctx{};
         bind_set_clauses(ctx, [](const auto&, std::string) {});

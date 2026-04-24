@@ -114,7 +114,7 @@ ut::suite<"query/insert"> insert_suite = [] {
 
         auto q   = atlas::insert<User>().value(u);
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "INSERT INTO users (id, name, email, age) VALUES ($1, $2, $3, $4)");
         expect(prm == std::vector<std::string>{"1", "Alice", "alice@corp.com", "30"});
@@ -125,7 +125,7 @@ ut::suite<"query/insert"> insert_suite = [] {
         User empty{};
         auto q   = atlas::insert<User>().value(empty);
         expect(q.to_sql(db) == "INSERT INTO users (id, name, email, age) VALUES ($1, $2, $3, $4)");
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(prm.size() == 4_u);
         expect(prm[0] == "0");   // id
@@ -144,7 +144,7 @@ ut::suite<"query/insert"> insert_suite = [] {
                        .set(&User::name,  std::string{"Bob"})
                        .set(&User::email, std::string{"bob@corp.com"});
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "INSERT INTO users (name, email) VALUES ($1, $2)");
         expect(prm == std::vector<std::string>{"Bob", "bob@corp.com"});
@@ -154,7 +154,7 @@ ut::suite<"query/insert"> insert_suite = [] {
         auto db  = make_db();
         auto q   = atlas::insert<User>().set(&User::name, std::string{"Anon"});
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "INSERT INTO users (name) VALUES ($1)");
         expect(prm.size() == 1_u);

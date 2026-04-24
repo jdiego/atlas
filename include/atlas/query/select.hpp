@@ -497,31 +497,26 @@ struct select_query_impl {
     }
 
     // -----------------------------------------------------------------------
-    // .params()
+    // .params(db)
     // -----------------------------------------------------------------------
-    [[nodiscard]] std::vector<std::string> params() const {
+    template <typename... Tables>
+    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...>&) const {
         /*
-         * What this function does:
-         *   Returns the ordered list of bound parameter values that correspond
-         *   to the $1, $2, … placeholders emitted by to_sql().
+         * Returns the ordered list of bound parameter values matching the
+         * $1, $2, … placeholders emitted by to_sql(db).
          *
-         * Preconditions:
-         *   - to_sql() and params() must agree on parameter order; implement
-         *     both via a shared private helper to guarantee consistency.
-         *
-         * Postconditions:
-         *   - ctx.params.size() == number of $N placeholders in to_sql() output.
+         * db is accepted for API symmetry with to_sql(db); not used here
+         * because JOIN/WHERE predicates store literal values directly.
          *
          * Pitfalls:
          *   - If to_sql() and params() traverse the AST in different orders the
          *     parameter indices will be wrong. Share implementation.
-         *
         */
         serialize_context ctx{};
         std::apply([&](const auto &...join_nodes) {
             (detail::collect_predicate_params(join_nodes.on, ctx), ...);
         }, joins);
-        if constexpr (not std::is_same_v<WherePred, std::monostate>) 
+        if constexpr (not std::is_same_v<WherePred, std::monostate>)
         {
             detail::collect_predicate_params(where_pred, ctx);
         }

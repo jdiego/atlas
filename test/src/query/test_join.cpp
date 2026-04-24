@@ -186,7 +186,7 @@ ut::suite<"query/join"> join_suite = [] {
                         .inner_join<Post>(atlas::eq(&Post::user_id, &User::id))
                         .where(atlas::eq(&User::id, 5));
         auto sql  = q.to_sql(db);
-        auto prm  = q.params();
+        auto prm  = q.params(db);
 
         expect(sql.find("INNER JOIN") != std::string::npos);
         expect(sql.find("WHERE u.id = $1") != std::string::npos);
@@ -203,7 +203,7 @@ ut::suite<"query/join"> join_suite = [] {
                        ))
                        .where(atlas::eq(&User::name, std::string{"Alice"}));
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "SELECT u.name, p.title FROM users u INNER JOIN posts p ON (p.user_id = u.id AND p.id > $1) WHERE u.name = $2");
         expect(prm == std::vector<std::string>{"10", "Alice"});

@@ -120,7 +120,7 @@ ut::suite<"query/update"> update_suite = [] {
                        .set(&User::name, std::string{"Alice2"})
                        .where(atlas::eq(&User::id, 1));
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "UPDATE users SET name = $1 WHERE id = $2");
         expect(prm == std::vector<std::string>{"Alice2", "1"});
@@ -133,7 +133,7 @@ ut::suite<"query/update"> update_suite = [] {
                        .set(&User::email, std::string{"b@c.com"})
                        .where(atlas::eq(&User::id, 5));
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "UPDATE users SET name = $1, email = $2 WHERE id = $3");
         expect(prm.size() == 3_u);

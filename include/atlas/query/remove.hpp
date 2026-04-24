@@ -286,14 +286,17 @@ struct remove_query {
     }
 
     // -----------------------------------------------------------------------
-    // .params()
+    // .params(db)
     // -----------------------------------------------------------------------
-    [[nodiscard]] std::vector<std::string> params() const
+    template<typename... Tables>
+    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...>&) const
     {
         /*
-         *   Returns the WHERE clause parameter strings.
+         * Returns the WHERE clause parameter strings.
+         * db is accepted for API symmetry with to_sql(db); not used here
+         * because predicates store literal values directly.
          */
-        if constexpr (std::is_same_v<Predicate, std::monostate>) 
+        if constexpr (std::is_same_v<Predicate, std::monostate>)
         {
             return {};
         }

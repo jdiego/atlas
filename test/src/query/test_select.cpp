@@ -200,7 +200,7 @@ ut::suite<"query/select"> select_suite = [] {
             .offset(10);
 
         std::string sql    = q.to_sql(db);
-        auto        params = q.params();
+        auto        params = q.params(db);
 
         expect(sql == "SELECT u.id, u.name FROM users u WHERE (u.age > $1 AND u.email LIKE $2) ORDER BY u.name ASC LIMIT 50 OFFSET 10");
         expect(params == std::vector<std::string>{"18", "%@corp.com"});

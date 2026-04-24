@@ -97,7 +97,7 @@ ut::suite<"query/remove"> remove_suite = [] {
         auto db  = make_db();
         auto q   = atlas::remove<User>().where(atlas::eq(&User::id, 1));
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "DELETE FROM users WHERE id = $1");
         expect(prm == std::vector<std::string>{"1"});
@@ -111,7 +111,7 @@ ut::suite<"query/remove"> remove_suite = [] {
                            atlas::eq(&User::name, std::string{"ghost"})
                        ));
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "DELETE FROM users WHERE (age < $1 AND name = $2)");
         expect(prm == std::vector<std::string>{"0", "ghost"});
@@ -121,7 +121,7 @@ ut::suite<"query/remove"> remove_suite = [] {
         auto db  = make_db();
         auto q   = atlas::remove<User>();
         auto sql = q.to_sql(db);
-        auto prm = q.params();
+        auto prm = q.params(db);
 
         expect(sql == "DELETE FROM users");
         expect(prm.empty());
