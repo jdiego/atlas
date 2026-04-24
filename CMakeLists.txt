@@ -69,12 +69,11 @@ if(PROJECT_IS_TOP_LEVEL)
     # Let's nicely support folders in IDE's
     set_property(GLOBAL PROPERTY USE_FOLDERS ON)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-    if(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json")
-        execute_process(COMMAND ${CMAKE_COMMAND} -E
-            copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json
-            ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
-        )
-    endif()
+    file(CREATE_LINK
+        ${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json
+        ${CMAKE_CURRENT_SOURCE_DIR}/compile_commands.json
+        COPY_ON_ERROR SYMBOLIC
+    )
     include(cmake/StaticAnalyzers.cmake)
     if(NOT CMAKE_BUILD_TYPE)
         set(CMAKE_BUILD_TYPE "Debug")

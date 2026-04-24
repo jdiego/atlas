@@ -88,7 +88,7 @@ template<typename C>
 concept is_primary_key = std::same_as<std::remove_cvref_t<C>, primary_key_t>;
 
 template<typename C>
-concept is_not_null = std::same_as<std::remove_cvref_t<C>, not_null_t>;
+concept is_not_null_constraint = std::same_as<std::remove_cvref_t<C>, not_null_t>;
 
 template<typename C>
 concept is_unique = std::same_as<std::remove_cvref_t<C>, unique_t>;
@@ -102,7 +102,7 @@ concept is_references = detail::is_references_impl<std::remove_cvref_t<C>>::valu
 template<typename C>
 concept is_constraint =
     is_primary_key<C>  ||
-    is_not_null<C>     ||
+    is_not_null_constraint<C>     ||
     is_unique<C>       ||
     is_default_value<C>||
     is_references<C>;

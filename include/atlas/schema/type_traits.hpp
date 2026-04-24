@@ -113,4 +113,15 @@ concept pg_mappable = requires {
     { pg_type<T>::oid      } -> std::convertible_to<pg_oid>;
 };
 
+template <template <typename...> class Template, typename T>
+inline constexpr bool is_specialization_of = false;
+
+template <template <typename...> class Template, typename... Args>
+inline constexpr bool is_specialization_of<Template, Template<Args...>> = true;
+
+
+namespace detail {
+    template <typename> inline constexpr bool always_false = false;
+}
+
 } // namespace atlas

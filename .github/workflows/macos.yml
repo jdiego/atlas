@@ -28,15 +28,18 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install boost pkg-config libpq
+          brew install llvm boost pkg-config libpq
           LIBPQ_PKGCONFIG_DIR="$(brew --prefix libpq)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=${LIBPQ_PKGCONFIG_DIR}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "$GITHUB_ENV"
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
 
       - name: Configure
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
             -DCMAKE_INSTALL_PREFIX=$INSTALL_LOCATION \
+            -DCMAKE_C_COMPILER=$LLVM_PREFIX/bin/clang \
+            -DCMAKE_CXX_COMPILER=$LLVM_PREFIX/bin/clang++ \
             -D${PROJECT_NAME}_ENABLE_TESTING=ON \
             -D${PROJECT_NAME}_ENABLE_STANDALONE=ON
 

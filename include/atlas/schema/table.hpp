@@ -15,13 +15,11 @@
 // name and type information. Also exposed as a free function for ergonomics.
 
 #include <cstddef>
-#include <functional>
 #include <optional>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
-#include <variant>
 
 #include "atlas/schema/column.hpp"
 
@@ -30,23 +28,32 @@ namespace atlas {
 namespace detail {
 template<typename... Columns>
 struct column_ref {
-    using variant_type = std::variant<std::reference_wrapper<const Columns>...>;
+    using tuple_type = std::tuple<Columns...>;
 
-    explicit constexpr column_ref(variant_type column) noexcept
-        : name(std::visit([](const auto& ref) { return ref.get().name; }, column)),
-          column(column) {}
+    constexpr column_ref(
+        std::string_view name,
+        const tuple_type& columns,
+        std::size_t index) noexcept
+        : name(name), columns(&columns), index(index) {}
 
     template<typename Constraint>
     [[nodiscard]] constexpr auto has_constraint() const noexcept -> bool {
-        return std::visit([](const auto& ref) {
-            return ref.get().template has_constraint<Constraint>();
-        }, column);
+        bool result = false;
+
+        [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+            (void)(((index == Indices)
+                ? (result = std::get<Indices>(*columns).template has_constraint<Constraint>(), true)
+                : false) || ...);
+        }(std::index_sequence_for<Columns...>{});
+
+        return result;
     }
 
     std::string_view name;
 
 private:
-    variant_type column;
+    const tuple_type* columns = nullptr;
+    std::size_t index = 0;
 };
 
 } // namespace detail
@@ -76,23 +83,25 @@ struct table_t {
     template<typename MemberPtr>
     [[nodiscard]] constexpr auto find_column(MemberPtr ptr) const {
         using result_type = detail::column_ref<Columns...>;
-        std::optional<typename result_type::variant_type> found;
 
-        std::apply([&](const auto&... col) {
+        std::optional<result_type> found;
+
+        [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
             ([&] {
+                const auto& col = std::get<Indices>(columns);
                 if constexpr (std::is_same_v<decltype(col.member_ptr), MemberPtr>) {
                     if (!found && col.member_ptr == ptr) {
-                        found.emplace(std::cref(col));
+                        found.emplace(col.name, columns, Indices);
                     }
                 }
             }(), ...);
-        }, columns);
+        }(std::index_sequence_for<Columns...>{});
 
         if (!found) {
             throw "find_column: member pointer not found in this table";
         }
 
-        return result_type{*found};
+        return *found;
     }
 };
 
