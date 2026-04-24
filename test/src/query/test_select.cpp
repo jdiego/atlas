@@ -219,4 +219,91 @@ ut::suite<"query/select"> select_suite = [] {
         std::string sql = q.to_sql(db);
         expect(sql.find("LIMIT") == std::string::npos);
     };
+
+    // -----------------------------------------------------------------------
+    // atlas::select_all<Entity>() and atlas::all<Entity>()
+    // -----------------------------------------------------------------------
+
+    "all<Entity>() returns the all_columns_t marker"_test = [] {
+        auto m = atlas::all<User>();
+        static_assert(std::is_same_v<decltype(m), atlas::all_columns_t<User>>);
+        expect(true);
+    };
+
+    "select_all<Entity>() carries an all_columns marker as the only selected expression"_test = [] {
+        auto q = atlas::select_all<User>();
+        static_assert(std::is_same_v<
+            decltype(q.selected),
+            std::tuple<atlas::all_columns_t<User>>>);
+        expect(true);
+    };
+
+    "select_all<Entity>() pre-stamps FromEntity so .from<>() is unnecessary"_test = [] {
+        auto db = make_db();
+        auto q  = atlas::select_all<User>();
+
+        // No .from<User>() call: should already serialize end-to-end.
+        std::string sql = q.to_sql(db);
+        expect(sql == "SELECT u.id, u.name, u.email, u.age FROM users u");
+    };
+
+    "select_all<Entity>() expands every mapped column in declaration order"_test = [] {
+        auto db = make_db();
+        auto q  = atlas::select_all<User>();
+
+        std::string sql = q.to_sql(db);
+        // Declaration order on the table_t drives serialization order.
+        auto idx_id    = sql.find("u.id");
+        auto idx_name  = sql.find("u.name");
+        auto idx_email = sql.find("u.email");
+        auto idx_age   = sql.find("u.age");
+        expect(idx_id    != std::string::npos);
+        expect(idx_name  != std::string::npos);
+        expect(idx_email != std::string::npos);
+        expect(idx_age   != std::string::npos);
+        expect(idx_id < idx_name);
+        expect(idx_name < idx_email);
+        expect(idx_email < idx_age);
+    };
+
+    "select_all<Entity>() chains where/order/limit"_test = [] {
+        auto db = make_db();
+        auto q  = atlas::select_all<User>()
+            .where(atlas::gt(&User::age, 21))
+            .order_by(&User::name)
+            .limit(10);
+
+        std::string sql    = q.to_sql(db);
+        auto        params = q.params(db);
+        expect(sql == "SELECT u.id, u.name, u.email, u.age FROM users u WHERE u.age > $1 ORDER BY u.name ASC LIMIT 10");
+        expect(params == std::vector<std::string>{"21"});
+    };
+
+    "select(all<Entity>()) expands inline when used as the only column"_test = [] {
+        auto db = make_db();
+        auto q  = atlas::select(atlas::all<User>()).from<User>();
+        std::string sql = q.to_sql(db);
+        expect(sql == "SELECT u.id, u.name, u.email, u.age FROM users u");
+    };
+
+    "select() expands all<Entity>() when it is the leading expression"_test = [] {
+        auto db = make_db();
+        auto q  = atlas::select(atlas::all<User>(), &Post::title)
+            .from<User>()
+            .inner_join<Post>(atlas::eq(&Post::user_id, &User::id));
+        std::string sql = q.to_sql(db);
+        expect(sql == "SELECT u.id, u.name, u.email, u.age, p.title FROM users u INNER JOIN posts p ON p.user_id = u.id");
+    };
+
+    "select() expands all<Entity>() when it follows another column"_test = [] {
+        // Regression guard: previous implementation emitted a stray ", " when
+        // all_columns_t appeared after a sibling column in the SELECT list.
+        auto db = make_db();
+        auto q  = atlas::select(&Post::title, atlas::all<User>())
+            .from<User>()
+            .inner_join<Post>(atlas::eq(&Post::user_id, &User::id));
+        std::string sql = q.to_sql(db);
+        expect(sql == "SELECT p.title, u.id, u.name, u.email, u.age FROM users u INNER JOIN posts p ON p.user_id = u.id");
+        expect(sql.find(", ,") == std::string::npos);
+    };
 };

@@ -12,6 +12,7 @@
 
 #include "atlas/query/expr.hpp"
 #include "atlas/schema/serde.hpp"
+#include <concepts>
 #include <ranges>
 #include <type_traits>
 #include <utility>
@@ -187,7 +188,10 @@ concept serializable = requires(const T &value) {
 };
 
 template <typename Container, typename T>
-concept iterable_of = std::ranges::range<Container> && serializable<std::ranges::range_value_t<Container>>;
+concept iterable_of =
+    std::ranges::range<Container> &&
+    std::convertible_to<std::ranges::range_value_t<Container>, T> &&
+    serializable<std::ranges::range_value_t<Container>>;
 
 } // namespace detail
 

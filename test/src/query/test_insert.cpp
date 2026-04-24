@@ -1,7 +1,7 @@
 // Tests for atlas/query/insert.hpp
 //
 // Covers full-object mode (.value()), partial mode (.set()), to_sql(), and
-// params().  Link-time failure expected until implementations are provided.
+// params(). 
 
 #include <boost/ut.hpp>
 

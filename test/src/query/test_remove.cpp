@@ -1,7 +1,6 @@
 // Tests for atlas/query/remove.hpp
 //
 // Covers atlas::remove<Entity>(), .where(), to_sql(), params().
-// Link-time failure expected until implementations are provided.
 
 #include <boost/ut.hpp>
 
