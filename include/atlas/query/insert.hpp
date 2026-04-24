@@ -6,14 +6,14 @@
 //
 //   Full-object: atlas::insert<User>().value(user_instance)
 //     All columns from the table definition are included in declaration order.
-//     The parameter list is produced via atlas::to_params().
+//     The parameter list follows the table declaration order.
 //
 //   Partial / column-by-column:
 //     atlas::insert<User>().set(&User::name, "Bob").set(&User::email, "b@c.com")
 //     Only the explicitly set columns appear in the INSERT; others are omitted.
 //     This is useful for tables with DEFAULT or auto-generated columns.
 //
-// Both modes share insert_query_impl; the SetClausesTuple template parameter
+// Both modes share insert_query_impl; the SetClauses template parameter
 // accumulates (column_ref, literal) pairs as .set() is called.
 
 #include <optional>
@@ -22,10 +22,13 @@
 #include <type_traits>
 #include <vector>
 
+#include "atlas/detail/type_utils.hpp"
 #include "atlas/query/expr.hpp"
+#include "atlas/query/sql_serialize.hpp"
 #include "atlas/schema/storage.hpp"
 
 namespace atlas {
+
 
 // ---------------------------------------------------------------------------
 // Internal: set_clause<ColRef, Lit>
@@ -42,58 +45,63 @@ struct set_clause {
 } // namespace detail
 
 // ---------------------------------------------------------------------------
+// Insert SET clause aliases
+// ---------------------------------------------------------------------------
+
+template<typename Entity, typename T>
+using insert_set_clause = detail::set_clause<column_ref<Entity, T>, literal<T>>;
+
+template<typename Entity, typename SetClauses, typename T>
+using insert_set_clauses_t = detail::tuple_append_t<SetClauses, insert_set_clause<Entity, T>>;
+
+// ---------------------------------------------------------------------------
 // insert_query_impl
 // ---------------------------------------------------------------------------
 
-template<typename Entity, typename SetClausesTuple = std::tuple<>>
+template<typename Entity, typename SetClauses = std::tuple<>>
 struct insert_query_impl {
 
-    SetClausesTuple set_clauses;
+    SetClauses set_clauses;
 
     // full-object mode flag: set by .value()
     // When true, to_sql serialises all columns from the table descriptor;
     // set_clauses is ignored.
     bool full_object_mode = false;
+    std::optional<Entity> entity_val;
+    mutable std::optional<std::vector<std::string>> params_cache;
 
     // -----------------------------------------------------------------------
     // .value(entity)
     // -----------------------------------------------------------------------
     // Full-object insert: all columns from the table definition are included.
     // Returns a new query tagged for full-object mode.
-    auto value(const Entity& e) &&
-        -> insert_query_impl<Entity, SetClausesTuple>
+    auto value(const Entity& entity) && -> insert_query_impl<Entity, SetClauses>
     {
         /*
-         * IMPLEMENTATION GUIDE:
-         *
          * What this function does:
          *   Stores the entity and marks the query for full-object serialisation.
-         *   to_sql will call atlas::to_params(e, table) to build the parameter list.
-         *
-         * Step 1 — Store a copy of e (add an std::optional<Entity> entity_val field
-         *           or similar storage mechanism to the struct).
-         * Step 2 — Set full_object_mode = true.
-         * Step 3 — Return std::move(*this).
+         *   to_sql will serialise the stored entity using the table column order.
          *
          * Key types involved:
-         *   - atlas::to_params(e, table): serde.hpp function that serialises all
-         *     columns in declaration order — reuse it here.
+         *   - detail::serialize_value<T>: converts each mapped field into its
+         *     PostgreSQL text representation.
          *
          * Preconditions:
          *   - .value() and .set() are mutually exclusive; do not call both.
          *
          * Postconditions:
          *   - full_object_mode == true.
-         *   - entity_val holds a copy of e.
+         *   - entity_val holds a copy of entity.
          *
          * Pitfalls:
          *   - The Entity copy may be expensive for large structs; consider
          *     storing only the parameter strings instead of the entity.
          *
-         * Hint:
-         *   Add   std::optional<Entity> entity_val;   to the struct.
-         *   entity_val = e; full_object_mode = true; return std::move(*this);
          */
+        entity_val = entity;
+        full_object_mode = true;
+        params_cache = std::nullopt;
+        return std::move(*this);
     }
 
     // -----------------------------------------------------------------------
@@ -101,52 +109,38 @@ struct insert_query_impl {
     // -----------------------------------------------------------------------
     // Partial insert: bind one column at a time.
     template<typename T>
-    auto set(T Entity::* col, T val) &&
-        -> insert_query_impl<
-               Entity,
-               detail::tuple_append_t<
-                   SetClausesTuple,
-                   detail::set_clause<
-                       column_ref<Entity, T>,
-                       literal<T>>>>
+    auto set(T Entity::* col, T val) && 
+        -> insert_query_impl<Entity, insert_set_clauses_t<Entity, SetClauses, T>>
     {
         /*
-         * IMPLEMENTATION GUIDE:
-         *
          * What this function does:
          *   Appends a (column_ref, literal) pair to the partial column list.
          *
-         * Step 1 — Construct detail::set_clause<column_ref<Entity,T>, literal<T>>
-         *           {column_ref<Entity,T>{col}, literal<T>{std::move(val)}}.
-         * Step 2 — Append via std::tuple_cat(std::move(set_clauses), clause_tuple).
-         * Step 3 — Return new insert_query_impl with the extended SetClausesTuple.
-         *
          * Key types involved:
          *   - detail::set_clause: pairs the column reference with its value.
-         *   - detail::tuple_append_t: grows the SetClausesTuple by one element.
+         *   - detail::tuple_append_t: grows the SetClauses by one element.
          *
          * Preconditions:
          *   - .set() must not be mixed with .value().
          *   - col must be registered in the table_t for Entity.
          *
          * Postconditions:
-         *   - SetClausesTuple has one more element.
+         *   - SetClauses has one more element.
          *
-         * Hint:
-         *   using SC = detail::set_clause<column_ref<Entity,T>, literal<T>>;
-         *   auto new_clauses = std::tuple_cat(
-         *       std::move(set_clauses),
-         *       std::make_tuple(SC{column_ref<Entity,T>{col}, literal<T>{std::move(val)}}));
-         *   return {std::move(new_clauses)};
-         */
+         */ 
+        using SetClause = insert_set_clause<Entity, T>;
+        auto new_clauses = std::tuple_cat(
+            std::move(set_clauses),
+            std::make_tuple(SetClause{column_ref<Entity,T>{col}, literal<T>{std::move(val)}})
+        );
+        return {std::move(new_clauses), false, std::nullopt, std::nullopt};
     }
 
     // -----------------------------------------------------------------------
     // .to_sql(db)
     // -----------------------------------------------------------------------
     template<typename... Tables>
-    [[nodiscard]] std::string
-    to_sql(const storage_t<Tables...>& db) const
+    [[nodiscard]] std::string to_sql(const storage_t<Tables...>& db) const
     {
         /*
          * IMPLEMENTATION GUIDE:
@@ -154,19 +148,11 @@ struct insert_query_impl {
          * What this function does:
          *   Serialises the INSERT query to a parameterised SQL string.
          *
-         * Step 1 — Resolve the table via db.get_table<Entity>().
-         * Step 2 — Determine the column list and VALUES placeholder list:
-         *   a) Full-object mode: iterate all columns via table.for_each_column()
-         *      to build "(col1, col2, …)" and "($1, $2, …)".
-         *   b) Partial mode: iterate SetClausesTuple via std::apply to build
-         *      "(col1, col2)" and "($1, $2)".
-         * Step 3 — Build "INSERT INTO <table> (<cols>) VALUES (<params>)".
          *
          * Key types involved:
          *   - serialize_context: accumulates $N params (sql_serialize.hpp).
-         *   - atlas::to_params(e, table): for full-object mode, serialises all
-         *     column values in declaration order.
-         *   - serialize_column_ref: for partial mode, resolves column names.
+         *   - detail::serialize_value<T>: converts each bound value to text.
+         *   - table.for_each_column(): resolves column names in partial mode.
          *
          * Preconditions:
          *   - Either .value() or at least one .set() must have been called.
@@ -177,14 +163,63 @@ struct insert_query_impl {
          *   - params() returns values in the same $N order.
          *
          * Pitfalls:
-         *   - Column order in full-object mode must match to_params() order
-         *     (both driven by table.for_each_column()).
+         *   - Full-object parameter order must follow table.for_each_column().
          *   - Partial mode: only explicitly set columns appear; DEFAULT applies
          *     to omitted columns.
          *
          * Hint:
-         *   Create a serialize_context; reuse it in params().
+         *   Use serialize_context as the single source of placeholder numbering.
          */
+
+        // Step 1 — Resolve the table via db.get_table<Entity>().
+        const auto& table = db.template get_table<Entity>();
+
+        serialize_context ctx{};
+        std::string cols;
+        std::string vals;
+        bool first = true;
+        auto append_binding = [&](std::string_view col_name, std::string value) {
+            if (!first) {
+                cols += ", ";
+                vals += ", ";
+            }
+
+            cols += col_name;
+            vals += ctx.next_param(std::move(value));
+            first = false;
+        };
+
+        //cStep 2 — Determine the column list and VALUES placeholder list:
+        if (full_object_mode) {
+            // Full-object mode: iterate all columns via table.for_each_column()
+            // and append each value through serialize_context::next_param().
+            table.for_each_column([&](const auto& col) {
+                append_binding(col.name, detail::serialize_value(col.get(*entity_val)));
+            });
+        } 
+        else {
+            //Partial mode: iterate SetClauses via std::apply and append
+            // each literal through serialize_context::next_param().
+            std::apply([&](const auto&... clauses) {
+                auto append_clause = [&](const auto& clause) {
+                    std::string col_name;
+                    table.for_each_column([&](const auto& col) {
+                        if constexpr (std::is_same_v<decltype(col.member_ptr), decltype(clause.col.ptr)>) {
+                            if (col.member_ptr == clause.col.ptr && col_name.empty()) {
+                                col_name = std::string(col.name);
+                            }
+                        }
+                    });
+                    append_binding(col_name, detail::serialize_value(clause.val.value));
+                };
+
+                (append_clause(clauses), ...);
+            }, set_clauses);
+        }
+
+        // Step 3 — Build "INSERT INTO <table> (<cols>) VALUES (<params>)".
+        params_cache = std::move(ctx.params);
+        return "INSERT INTO " + std::string(table.name) + " (" + cols + ") VALUES (" + vals + ")";
     }
 
     // -----------------------------------------------------------------------
@@ -193,17 +228,38 @@ struct insert_query_impl {
     [[nodiscard]] std::vector<std::string> params() const
     {
         /*
-         * IMPLEMENTATION GUIDE:
-         *
          * What this function does:
          *   Returns the parameter value strings corresponding to the $N
          *   placeholders in to_sql().
          *
-         * Step 1 — Replicate the same column/value traversal as to_sql().
-         * Step 2 — Return the accumulated params vector.
-         *
-         * Hint: share a private build_params() helper with to_sql().
          */
+        if (full_object_mode) {
+            return params_cache.value_or(std::vector<std::string>{});
+        }
+
+        return build_partial_params();
+    }
+private:
+    [[nodiscard]] std::vector<std::string> build_partial_params() const {
+        /*
+         * What this function does:
+         *   Collects the partial-insert literal values in SET call order.
+         *
+         * Key types involved:
+         *   - serialize_context: manages the params vector.
+         *   - detail::serialize_value<T>: converts each literal to text.
+         *
+         * Preconditions:
+         *   - full_object_mode == false.
+         *
+         * Postconditions:
+         *   - Returns the vector of parameter strings in placeholder order.
+         */
+        serialize_context ctx{};
+        std::apply([&](const auto&... clauses) {
+            (ctx.next_param(detail::serialize_value(clauses.val.value)), ...);
+        }, set_clauses);
+        return std::move(ctx.params);
     }
 };
 
@@ -222,17 +278,12 @@ template<typename Entity>
 constexpr auto insert() -> insert_query<Entity>
 {
     /*
-     * IMPLEMENTATION GUIDE:
-     *
      * What this function does:
      *   Returns a default-constructed insert_query ready for .value() or
      *   .set() calls.
      *
-     * Step 1 — Return insert_query<Entity>{}.
-     *
-     * Hint:
-     *   return insert_query<Entity>{};
      */
+    return insert_query<Entity>{};
 }
 
 } // namespace atlas

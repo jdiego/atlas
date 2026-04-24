@@ -4,7 +4,7 @@
 // inner_join / left_join methods.
 // Link-time failure expected until implementations are provided.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/join.hpp"
 #include "atlas/query/predicate.hpp"
@@ -18,6 +18,9 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entities & schema
@@ -47,13 +50,14 @@ static auto make_db() {
     return atlas::make_storage(user_table, post_table);
 }
 
-// ---------------------------------------------------------------------------
-// TEST: join_clause struct
-// ---------------------------------------------------------------------------
+ut::suite<"query/join"> join_suite = [] {
+    using namespace ut;
 
-TEST_CASE("join_clause stores join kind and ON predicate", "[join][join_clause]") {
+    // -----------------------------------------------------------------------
+    // join_clause struct
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — inner join with eq predicate") {
+    "join_clause stores inner join kind with eq ON predicate"_test = [] {
         using on_pred_t = atlas::eq_expr<
             atlas::column_ref<Post, int32_t>,
             atlas::column_ref<User, int32_t>>;
@@ -66,11 +70,11 @@ TEST_CASE("join_clause stores join kind and ON predicate", "[join][join_clause]"
         atlas::join_clause<Post, on_pred_t, atlas::join_kind::inner> jc{on_pred};
 
         static_assert(jc.kind == atlas::join_kind::inner);
-        CHECK(jc.on.lhs.ptr == &Post::user_id);
-        CHECK(jc.on.rhs.ptr == &User::id);
-    }
+        expect(jc.on.lhs.ptr == &Post::user_id);
+        expect(jc.on.rhs.ptr == &User::id);
+    };
 
-    SECTION("edge case — left join kind") {
+    "join_clause stores left join kind"_test = [] {
         using on_pred_t = atlas::eq_expr<
             atlas::column_ref<Post, int32_t>,
             atlas::column_ref<User, int32_t>>;
@@ -83,38 +87,34 @@ TEST_CASE("join_clause stores join kind and ON predicate", "[join][join_clause]"
         };
 
         static_assert(jc.kind == atlas::join_kind::left);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: is_join_clause concept
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // is_join_clause concept
+    // -----------------------------------------------------------------------
 
-TEST_CASE("is_join_clause concept accepts join_clause and rejects others",
-          "[join][concept]") {
+    "is_join_clause accepts join_clause and rejects others"_test = [] {
+        using on_pred_t = atlas::eq_expr<
+            atlas::column_ref<Post, int32_t>,
+            atlas::column_ref<User, int32_t>>;
 
-    using on_pred_t = atlas::eq_expr<
-        atlas::column_ref<Post, int32_t>,
-        atlas::column_ref<User, int32_t>>;
+        static_assert(atlas::is_join_clause<
+            atlas::join_clause<Post, on_pred_t, atlas::join_kind::inner>>);
+        static_assert(atlas::is_join_clause<
+            atlas::join_clause<Post, on_pred_t, atlas::join_kind::left>>);
 
-    static_assert(atlas::is_join_clause<
-        atlas::join_clause<Post, on_pred_t, atlas::join_kind::inner>>);
-    static_assert(atlas::is_join_clause<
-        atlas::join_clause<Post, on_pred_t, atlas::join_kind::left>>);
+        static_assert(!atlas::is_join_clause<int>);
+        static_assert(!atlas::is_join_clause<on_pred_t>);
 
-    static_assert(!atlas::is_join_clause<int>);
-    static_assert(!atlas::is_join_clause<on_pred_t>);
+        expect(true);
+    };
 
-    CHECK(true);
-}
+    // -----------------------------------------------------------------------
+    // select_query.inner_join()
+    // -----------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// TEST: select_query.inner_join()
-// ---------------------------------------------------------------------------
-
-TEST_CASE("inner_join() appends a join_clause to JoinsTuple", "[join][inner_join]") {
-
-    SECTION("happy path — one INNER JOIN") {
+    "inner_join() appends one join_clause"_test = [] {
         auto q = atlas::select(&User::name, &Post::title)
             .from<User>()
             .inner_join<Post>(atlas::eq(&Post::user_id, &User::id));
@@ -123,10 +123,10 @@ TEST_CASE("inner_join() appends a join_clause to JoinsTuple", "[join][inner_join
 
         const auto& jc = std::get<0>(q.joins);
         static_assert(jc.kind == atlas::join_kind::inner);
-        CHECK(jc.on.lhs.ptr == &Post::user_id);
-    }
+        expect(jc.on.lhs.ptr == &Post::user_id);
+    };
 
-    SECTION("edge case — two JOINs chained") {
+    "inner_join() can be chained twice"_test = [] {
         struct Comment {
             int32_t id{};
             int32_t post_id{};
@@ -138,60 +138,74 @@ TEST_CASE("inner_join() appends a join_clause to JoinsTuple", "[join][inner_join
             .inner_join<Comment>(atlas::eq(&Comment::post_id, &Post::id));
 
         static_assert(std::tuple_size_v<decltype(q.joins)> == 2u);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: select_query.left_join()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // select_query.left_join()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("left_join() appends a left join_clause", "[join][left_join]") {
-
-    SECTION("happy path") {
+    "left_join() appends a left join_clause"_test = [] {
         auto q = atlas::select(&User::name, &Post::title)
             .from<User>()
             .left_join<Post>(atlas::eq(&Post::user_id, &User::id));
 
         const auto& jc = std::get<0>(q.joins);
         static_assert(jc.kind == atlas::join_kind::left);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: to_sql() with JOIN (link-time stub)
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // to_sql() with JOIN
+    // -----------------------------------------------------------------------
 
-TEST_CASE("select with inner_join produces correct SQL", "[join][to_sql]") {
-    auto db = make_db();
-
-    SECTION("happy path — INNER JOIN with ON") {
+    "INNER JOIN with ON produces correct SQL"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::select(&User::name, &Post::title)
                        .from<User>()
                        .inner_join<Post>(atlas::eq(&Post::user_id, &User::id));
         auto sql = q.to_sql(db);
 
-        CHECK(sql == "SELECT u.name, p.title FROM users u INNER JOIN posts p ON p.user_id = u.id");
-    }
+        expect(sql == "SELECT u.name, p.title FROM users u INNER JOIN posts p ON p.user_id = u.id");
+    };
 
-    SECTION("edge case — LEFT JOIN produces LEFT JOIN keyword") {
+    "LEFT JOIN produces LEFT JOIN keyword"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::select(&User::name, &Post::title)
                        .from<User>()
                        .left_join<Post>(atlas::eq(&Post::user_id, &User::id));
         auto sql = q.to_sql(db);
 
-        CHECK(sql.find("LEFT JOIN") != std::string::npos);
-    }
+        expect(sql.find("LEFT JOIN") != std::string::npos);
+    };
 
-    SECTION("edge case — JOIN + WHERE clause") {
-        auto q   = atlas::select(&User::name, &Post::title)
-                       .from<User>()
-                       .inner_join<Post>(atlas::eq(&Post::user_id, &User::id))
-                       .where(atlas::eq(&User::id, 5));
+    "JOIN combined with WHERE produces both clauses"_test = [] {
+        auto db   = make_db();
+        auto q    = atlas::select(&User::name, &Post::title)
+                        .from<User>()
+                        .inner_join<Post>(atlas::eq(&Post::user_id, &User::id))
+                        .where(atlas::eq(&User::id, 5));
         auto sql  = q.to_sql(db);
         auto prm  = q.params();
 
-        CHECK(sql.find("INNER JOIN") != std::string::npos);
-        CHECK(sql.find("WHERE u.id = $1") != std::string::npos);
-        CHECK(prm == std::vector<std::string>{"5"});
-    }
-}
+        expect(sql.find("INNER JOIN") != std::string::npos);
+        expect(sql.find("WHERE u.id = $1") != std::string::npos);
+        expect(prm == std::vector<std::string>{"5"});
+    };
+
+    "JOIN ON params come before WHERE params"_test = [] {
+        auto db  = make_db();
+        auto q   = atlas::select(&User::name, &Post::title)
+                       .from<User>()
+                       .inner_join<Post>(atlas::and_(
+                           atlas::eq(&Post::user_id, &User::id),
+                           atlas::gt(&Post::id, 10)
+                       ))
+                       .where(atlas::eq(&User::name, std::string{"Alice"}));
+        auto sql = q.to_sql(db);
+        auto prm = q.params();
+
+        expect(sql == "SELECT u.name, p.title FROM users u INNER JOIN posts p ON (p.user_id = u.id AND p.id > $1) WHERE u.name = $2");
+        expect(prm == std::vector<std::string>{"10", "Alice"});
+    };
+};

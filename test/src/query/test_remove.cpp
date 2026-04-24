@@ -3,7 +3,7 @@
 // Covers atlas::remove<Entity>(), .where(), to_sql(), params().
 // Link-time failure expected until implementations are provided.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/remove.hpp"
 #include "atlas/schema/column.hpp"
@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entity & schema
@@ -37,28 +40,27 @@ static auto make_db() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// TEST: atlas::remove<Entity>() factory
-// ---------------------------------------------------------------------------
+ut::suite<"query/remove"> remove_suite = [] {
+    using namespace ut;
 
-TEST_CASE("remove() factory returns default remove_query", "[remove][factory]") {
+    // -----------------------------------------------------------------------
+    // atlas::remove<Entity>() factory
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — initial state is monostate predicate") {
+    "remove() returns default remove_query with monostate predicate"_test = [] {
         auto q = atlas::remove<User>();
 
         using expected_t = atlas::remove_query<User>;
         static_assert(std::is_same_v<decltype(q), expected_t>);
         static_assert(std::is_same_v<decltype(q.where_pred), std::monostate>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .where()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .where()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("remove().where() attaches a predicate", "[remove][where]") {
-
-    SECTION("happy path — eq predicate changes Predicate type") {
+    "where() with eq predicate changes predicate type"_test = [] {
         auto q = atlas::remove<User>().where(atlas::eq(&User::id, 1));
 
         using expected_pred_t = atlas::eq_expr<
@@ -66,43 +68,43 @@ TEST_CASE("remove().where() attaches a predicate", "[remove][where]") {
             atlas::literal<int>>;
         static_assert(std::is_same_v<decltype(q.where_pred), expected_pred_t>);
 
-        CHECK(q.where_pred.lhs.ptr == &User::id);
-        CHECK(q.where_pred.rhs.value == 1);
-    }
+        expect(q.where_pred.lhs.ptr == &User::id);
+        expect(q.where_pred.rhs.value == 1);
+    };
 
-    SECTION("edge case — compound predicate") {
+    "where() accepts compound predicate"_test = [] {
         auto q = atlas::remove<User>()
             .where(atlas::and_(
                 atlas::eq(&User::id, 42),
                 atlas::eq(&User::name, std::string{"temp"})
             ));
         static_assert(atlas::is_predicate<decltype(q.where_pred)>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — not_ predicate") {
+    "where() accepts not_ predicate"_test = [] {
         auto q = atlas::remove<User>()
             .where(atlas::not_(atlas::eq(&User::id, 0)));
         static_assert(atlas::is_predicate<decltype(q.where_pred)>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: to_sql() + params()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // to_sql() + params()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("remove().to_sql() produces correct DELETE statement", "[remove][to_sql]") {
-    auto db = make_db();
-
-    SECTION("happy path — DELETE with WHERE") {
+    "DELETE with simple WHERE"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::remove<User>().where(atlas::eq(&User::id, 1));
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "DELETE FROM users WHERE id = $1");
-        CHECK(prm == std::vector<std::string>{"1"});
-    }
+        expect(sql == "DELETE FROM users WHERE id = $1");
+        expect(prm == std::vector<std::string>{"1"});
+    };
 
-    SECTION("edge case — DELETE with compound WHERE") {
+    "DELETE with compound WHERE"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::remove<User>()
                        .where(atlas::and_(
                            atlas::lt(&User::age, 0),
@@ -111,16 +113,17 @@ TEST_CASE("remove().to_sql() produces correct DELETE statement", "[remove][to_sq
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "DELETE FROM users WHERE (u.age < $1 AND u.name = $2)");
-        CHECK(prm == std::vector<std::string>{"0", "ghost"});
-    }
+        expect(sql == "DELETE FROM users WHERE (age < $1 AND name = $2)");
+        expect(prm == std::vector<std::string>{"0", "ghost"});
+    };
 
-    SECTION("edge case — DELETE without WHERE (full table delete)") {
+    "DELETE without WHERE deletes full table"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::remove<User>();
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "DELETE FROM users");
-        CHECK(prm.empty());
-    }
-}
+        expect(sql == "DELETE FROM users");
+        expect(prm.empty());
+    };
+};

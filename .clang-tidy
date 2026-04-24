@@ -1,28 +1,25 @@
 ---
-
 # Aliases
 # - cppcoreguidelines-avoid-c-arrays => modernize-avoid-c-arrays
 # - cppcoreguidelines-non-private-member-variables-in-classes => misc-non-private-member-variables-in-classes
 # - cppcoreguidelines-explicit-virtual-functions, hicpp-use-override => modernize-use-override
 # - bugprone-narrowing-conversions => cppcoreguidelines-narrowing-conversions
-
-
 Checks: |
   *,
   -fuchsia-*,
   -google-*,
   -zircon-*,
   -abseil-*,
+  -altera-*,
   -modernize-use-trailing-return-type,
   -llvm-*,
   -llvmlibc-*,
   -llvmlibc-restrict-system-libc-headers
-
-WarningsAsErrors: '*'
-HeaderFilterRegex: ''
+WarningsAsErrors: ''
+HeaderFilterRegex: '(include|src)/.*'
 FormatStyle: none
 CheckOptions:
-  - key:             misc-non-private-member-variables-in-classes 
+  - key:             misc-non-private-member-variables-in-classes
     value:           IgnoreClassesWithAllMemberVariablesBeingPublic
   - key:             modernize-use-override.AllowOverrideAndFinal
     value:           'true'

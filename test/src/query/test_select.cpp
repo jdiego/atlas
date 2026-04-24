@@ -3,7 +3,7 @@
 // Uses mock storage (no libpq). to_sql() / params() calls are present and
 // will fail at link time until implementations are provided.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/select.hpp"
 #include "atlas/schema/column.hpp"
@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entities & schema
@@ -47,61 +50,56 @@ static auto make_db() {
     return atlas::make_storage(user_table, post_table);
 }
 
-// ---------------------------------------------------------------------------
-// TEST: atlas::select() factory
-// ---------------------------------------------------------------------------
+ut::suite<"query/select"> select_suite = [] {
+    using namespace ut;
 
-TEST_CASE("select() factory wraps member pointers in column_refs", "[select][factory]") {
+    // -----------------------------------------------------------------------
+    // atlas::select() factory
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — two columns") {
+    "select() wraps two member pointers into column_refs"_test = [] {
         auto q = atlas::select(&User::id, &User::name);
 
-        using expected_col_refs = std::tuple<
+        using expected_selected = std::tuple<
             atlas::column_ref<User, int32_t>,
             atlas::column_ref<User, std::string>>;
-        static_assert(std::is_same_v<
-            decltype(q.col_refs), expected_col_refs>);
-    }
+        static_assert(std::is_same_v<decltype(q.selected), expected_selected>);
+        expect(true);
+    };
 
-    SECTION("happy path — single column") {
+    "select() wraps a single member pointer"_test = [] {
         auto q = atlas::select(&User::email);
         static_assert(std::is_same_v<
-            decltype(q.col_refs),
+            decltype(q.selected),
             std::tuple<atlas::column_ref<User, std::string>>>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — initial state has monostate for FromEntity and WherePred") {
+    "select() initial state has monostate predicate and no limit/offset"_test = [] {
         auto q = atlas::select(&User::id);
         static_assert(std::is_same_v<
             std::remove_cvref_t<decltype(q.where_pred)>, std::monostate>);
-        static_assert(!q.limit_n.has_value());
-        static_assert(!q.offset_n.has_value());
-    }
-}
+        expect(!q.limit_n.has_value());
+        expect(!q.offset_n.has_value());
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .from<Entity>()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .from<Entity>()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("from() stamps the FromEntity type parameter", "[select][from]") {
-
-    SECTION("happy path") {
+    "from<Entity>() stamps the FromEntity type parameter"_test = [] {
         auto q = atlas::select(&User::id).from<User>();
 
-        // FromEntity is now User; the select_query_impl type changes.
-        // Verify via the type of the returned object's where_pred (monostate).
         static_assert(std::is_same_v<
             std::remove_cvref_t<decltype(q.where_pred)>, std::monostate>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .where()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .where()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("where() attaches a predicate and changes WherePred type", "[select][where]") {
-
-    SECTION("happy path — simple eq predicate") {
+    "where() attaches a simple eq predicate"_test = [] {
         auto pred = atlas::eq(&User::id, 1);
         auto q    = atlas::select(&User::id).from<User>().where(pred);
 
@@ -110,9 +108,10 @@ TEST_CASE("where() attaches a predicate and changes WherePred type", "[select][w
             atlas::literal<int>>;
         static_assert(std::is_same_v<
             std::remove_cvref_t<decltype(q.where_pred)>, expected_pred>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — and_ combinator as predicate") {
+    "where() accepts and_ combinator predicate"_test = [] {
         auto q = atlas::select(&User::name)
             .from<User>()
             .where(atlas::and_(
@@ -120,84 +119,76 @@ TEST_CASE("where() attaches a predicate and changes WherePred type", "[select][w
                 atlas::like(&User::email, std::string{"%@corp.com"})
             ));
         static_assert(atlas::is_predicate<decltype(q.where_pred)>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .order_by()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .order_by()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("order_by() appends an order_by_clause to the tuple", "[select][order_by]") {
-
-    SECTION("happy path — single column ascending") {
+    "order_by() appends a single ascending order clause"_test = [] {
         auto q = atlas::select(&User::name)
             .from<User>()
             .order_by(&User::name);
 
-        // OrderByTuple should have one element
         static_assert(std::tuple_size_v<decltype(q.order_cols)> == 1u);
-    }
+        expect(true);
+    };
 
-    SECTION("happy path — two order-by columns") {
+    "order_by() chains two clauses"_test = [] {
         auto q = atlas::select(&User::id, &User::name)
             .from<User>()
             .order_by(&User::name)
-            .order_by(&User::id, false);  // descending
+            .order_by(&User::id, false);
 
         static_assert(std::tuple_size_v<decltype(q.order_cols)> == 2u);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — descending flag stored correctly") {
+    "order_by() stores descending flag correctly"_test = [] {
         auto q = atlas::select(&User::age)
             .from<User>()
             .order_by(&User::age, false);
 
         const auto& clause = std::get<0>(q.order_cols);
-        CHECK(clause.ascending == false);
-        CHECK(clause.col == &User::age);
-    }
-}
+        expect(clause.ascending == false);
+        expect(clause.col == &User::age);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .limit() and .offset()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .limit() and .offset()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("limit() and offset() store optional values", "[select][limit_offset]") {
-
-    SECTION("happy path — both set") {
+    "limit() and offset() store optional values"_test = [] {
         auto q = atlas::select(&User::id)
             .from<User>()
             .limit(50)
             .offset(10);
 
-        REQUIRE(q.limit_n.has_value());
-        REQUIRE(q.offset_n.has_value());
-        CHECK(*q.limit_n  == 50u);
-        CHECK(*q.offset_n == 10u);
-    }
+        expect(q.limit_n.has_value());
+        expect(q.offset_n.has_value());
+        expect(*q.limit_n  == 50_u);
+        expect(*q.offset_n == 10_u);
+    };
 
-    SECTION("edge case — only limit set") {
+    "limit() only, without offset"_test = [] {
         auto q = atlas::select(&User::id).from<User>().limit(1);
-        CHECK(q.limit_n.has_value());
-        CHECK(!q.offset_n.has_value());
-    }
+        expect(q.limit_n.has_value());
+        expect(!q.offset_n.has_value());
+    };
 
-    SECTION("edge case — limit(0) is stored even though semantically questionable") {
+    "limit(0) is stored"_test = [] {
         auto q = atlas::select(&User::id).from<User>().limit(0);
-        CHECK(q.limit_n.has_value());
-        CHECK(*q.limit_n == 0u);
-    }
-}
+        expect(q.limit_n.has_value());
+        expect(*q.limit_n == 0_u);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .to_sql() and .params() — specification tests
-// (Link-time failure expected until implementation is provided.)
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .to_sql() and .params()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("to_sql() produces correct parameterised SQL for SELECT", "[select][to_sql]") {
-    auto db = make_db();
-
-    SECTION("happy path — WHERE + LIMIT + OFFSET") {
+    "to_sql() emits WHERE + LIMIT + OFFSET with bound params"_test = [] {
+        auto db = make_db();
         auto q = atlas::select(&User::id, &User::name)
             .from<User>()
             .where(atlas::and_(
@@ -211,19 +202,21 @@ TEST_CASE("to_sql() produces correct parameterised SQL for SELECT", "[select][to
         std::string sql    = q.to_sql(db);
         auto        params = q.params();
 
-        CHECK(sql    == "SELECT u.id, u.name FROM users u WHERE (u.age > $1 AND u.email LIKE $2) ORDER BY u.name ASC LIMIT 50 OFFSET 10");
-        CHECK(params == std::vector<std::string>{"18", "%@corp.com"});
-    }
+        expect(sql == "SELECT u.id, u.name FROM users u WHERE (u.age > $1 AND u.email LIKE $2) ORDER BY u.name ASC LIMIT 50 OFFSET 10");
+        expect(params == std::vector<std::string>{"18", "%@corp.com"});
+    };
 
-    SECTION("edge case — no WHERE clause") {
+    "to_sql() omits WHERE when no predicate is attached"_test = [] {
+        auto db = make_db();
         auto q = atlas::select(&User::id).from<User>();
         std::string sql = q.to_sql(db);
-        CHECK(sql.find("WHERE") == std::string::npos);
-    }
+        expect(sql.find("WHERE") == std::string::npos);
+    };
 
-    SECTION("edge case — no LIMIT") {
+    "to_sql() omits LIMIT when not set"_test = [] {
+        auto db = make_db();
         auto q = atlas::select(&User::id).from<User>().where(atlas::eq(&User::id, 1));
         std::string sql = q.to_sql(db);
-        CHECK(sql.find("LIMIT") == std::string::npos);
-    }
-}
+        expect(sql.find("LIMIT") == std::string::npos);
+    };
+};

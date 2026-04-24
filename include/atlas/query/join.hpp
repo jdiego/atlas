@@ -8,11 +8,15 @@
 // serialises them after the primary FROM clause.
 //
 // To extend select_query with join support, the inner_join / left_join methods
-// produce a new select_query specialisation where:
+// produce a new select_query specialisation. select_query_impl names that
+// transition with aliases such as inner_join_result_t / left_join_result_t
+// rather than exposing tuple plumbing directly in the public signature.
 //
-//   NewJoinsTuple = detail::tuple_append_t<
+// Internally, the new JoinsTuple is still:
+//
+//   detail::tuple_append_t<
 //       OldJoinsTuple,
-//       join_clause<RhsEntity, OnPredicate, Kind>
+//       join_clause<RhsEntity, OnPredicate, Kind, Tag>
 //   >
 //
 // The ON predicate is typically a column_eq_ref (cross-table column equality)
@@ -34,10 +38,18 @@ enum class join_kind { inner, left, right, full };
 
 template<typename RhsEntity,
          typename OnPredicate,
-         join_kind Kind = join_kind::inner>
+         join_kind Kind = join_kind::inner,
+         typename Tag  = void>
 struct join_clause {
     // The RHS entity type drives the table name lookup in storage_t.
     using rhs_entity_type = RhsEntity;
+
+    // Tag type for self-join disambiguation. When void, the serializer
+    // falls back to the default first-letter alias scheme. When set to a
+    // user-defined tag type (e.g. struct mgr { ... alias = "m"; }), the
+    // alias is used to qualify the joined table in the ON and SELECT
+    // clauses.
+    using tag_type = Tag;
 
     // The join kind controls the SQL keyword (INNER JOIN, LEFT JOIN, etc.).
     static constexpr join_kind kind = Kind;
@@ -54,8 +66,8 @@ namespace detail {
 
 template<typename T> struct is_join_clause_impl : std::false_type {};
 
-template<typename E, typename P, join_kind K>
-struct is_join_clause_impl<join_clause<E, P, K>> : std::true_type {};
+template<typename E, typename P, join_kind K, typename Tag>
+struct is_join_clause_impl<join_clause<E, P, K, Tag>> : std::true_type {};
 
 } // namespace detail
 
@@ -70,35 +82,13 @@ concept is_join_clause = detail::is_join_clause_impl<std::remove_cvref_t<T>>::va
 // member functions of select_query_impl (select.hpp). They follow this
 // pattern:
 //
-//   template<typename RhsEntity, typename OnPredicate>
+//   template<typename RhsEntity, typename RhsTag = void, typename OnPredicate>
 //   auto inner_join(OnPredicate&& on) &&
-//       -> select_query_impl<
-//              ColRefsTuple,
-//              FromEntity,
-//              WherePred,
-//              OrderByTuple,
-//              detail::tuple_append_t<
-//                  JoinsTuple,
-//                  join_clause<RhsEntity,
-//                              std::remove_cvref_t<OnPredicate>,
-//                              join_kind::inner>
-//              >
-//          >;
+//       -> inner_join_result_t<RhsEntity, OnPredicate, RhsTag>;
 //
-//   template<typename RhsEntity, typename OnPredicate>
+//   template<typename RhsEntity, typename RhsTag = void, typename OnPredicate>
 //   auto left_join(OnPredicate&& on) &&
-//       -> select_query_impl<
-//              ColRefsTuple,
-//              FromEntity,
-//              WherePred,
-//              OrderByTuple,
-//              detail::tuple_append_t<
-//                  JoinsTuple,
-//                  join_clause<RhsEntity,
-//                              std::remove_cvref_t<OnPredicate>,
-//                              join_kind::left>
-//              >
-//          >;
+//       -> left_join_result_t<RhsEntity, OnPredicate, RhsTag>;
 //
 // The ON predicate for column-to-column equality in JOINs is typically:
 //

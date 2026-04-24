@@ -18,9 +18,191 @@
 #include <vector>
 
 #include "atlas/query/predicate.hpp"
+#include "atlas/query/sql_serialize.hpp"
 #include "atlas/schema/storage.hpp"
 
 namespace atlas {
+
+namespace detail {
+
+template <typename Entity, typename T, typename Tag, typename... Tables>
+[[nodiscard]] inline std::string serialize_delete_column_ref(
+    const atlas::column_ref<Entity, T, Tag>& ref, 
+    const storage_t<Tables...>& db
+){
+    const auto& table = db.template get_table<Entity>();
+    std::string col_name;
+
+    table.for_each_column([&](const auto& col) {
+        if constexpr (std::is_same_v<decltype(col.member_ptr), decltype(ref.ptr)>) {
+            if (col.member_ptr == ref.ptr && col_name.empty()) {
+                col_name = std::string(col.name);
+            }
+        }
+    });
+
+    return col_name;
+}
+
+template <bool EmitSql, typename Rhs, typename... Tables>
+inline void walk_delete_rhs(
+    const Rhs& rhs,
+    const storage_t<Tables...>& db,
+    serialize_context& ctx,
+    std::string& sql)
+{
+    using R = std::remove_cvref_t<Rhs>;
+
+    if constexpr (is_literal<R>) {
+        auto placeholder = ctx.next_param(detail::serialize_value(rhs.value));
+        if constexpr (EmitSql) {
+            sql += placeholder;
+        }
+    } else if constexpr (is_column_ref<R>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(rhs, db);
+        }
+    } else {
+        static_assert(always_false<R>, "walk_delete_rhs: unsupported RHS type in DELETE predicate");
+    }
+}
+
+template <bool EmitSql, typename Predicate, typename... Tables>
+inline void walk_delete_predicate(
+    const Predicate& pred,
+    const storage_t<Tables...>& db,
+    serialize_context& ctx,
+    std::string& sql)
+{
+    using Pred = std::remove_cvref_t<Predicate>;
+    static_assert(is_predicate<Pred>, "walk_delete_predicate: unsupported predicate type");
+
+    if constexpr (is_specialization_of<eq_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " = ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<ne_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " != ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<lt_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " < ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<gt_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " > ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<lte_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " <= ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<gte_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " >= ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<like_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.lhs, db);
+            sql += " LIKE ";
+        }
+        walk_delete_rhs<EmitSql>(pred.rhs, db, ctx, sql);
+    } else if constexpr (is_specialization_of<is_null_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.col, db);
+            sql += " IS NULL";
+        }
+    } else if constexpr (is_specialization_of<is_not_null_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.col, db);
+            sql += " IS NOT NULL";
+        }
+    } else if constexpr (is_specialization_of<in_expr, Pred>) {
+        if (pred.values.empty()) {
+            if constexpr (EmitSql) {
+                sql += "FALSE";
+            }
+            return;
+        }
+
+        if constexpr (EmitSql) {
+            sql += serialize_delete_column_ref(pred.col, db);
+            sql += " IN (";
+            bool first = true;
+            for (const auto& value : pred.values) {
+                if (!first) {
+                    sql += ", ";
+                }
+                sql += ctx.next_param(detail::serialize_value(value));
+                first = false;
+            }
+            sql += ")";
+        } else {
+            for (const auto& value : pred.values) {
+                ctx.next_param(detail::serialize_value(value));
+            }
+        }
+    } else if constexpr (is_specialization_of<and_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += "(";
+        }
+        walk_delete_predicate<EmitSql>(pred.lhs, db, ctx, sql);
+        if constexpr (EmitSql) {
+            sql += " AND ";
+        }
+        walk_delete_predicate<EmitSql>(pred.rhs, db, ctx, sql);
+        if constexpr (EmitSql) {
+            sql += ")";
+        }
+    } else if constexpr (is_specialization_of<or_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += "(";
+        }
+        walk_delete_predicate<EmitSql>(pred.lhs, db, ctx, sql);
+        if constexpr (EmitSql) {
+            sql += " OR ";
+        }
+        walk_delete_predicate<EmitSql>(pred.rhs, db, ctx, sql);
+        if constexpr (EmitSql) {
+            sql += ")";
+        }
+    } else if constexpr (is_specialization_of<not_expr, Pred>) {
+        if constexpr (EmitSql) {
+            sql += "NOT (";
+        }
+        walk_delete_predicate<EmitSql>(pred.inner, db, ctx, sql);
+        if constexpr (EmitSql) {
+            sql += ")";
+        }
+    } else {
+        static_assert(always_false<Pred>, "walk_delete_predicate: unhandled predicate type");
+    }
+}
+
+template <typename Predicate, typename... Tables>
+[[nodiscard]] inline std::string serialize_delete_predicate(
+    const Predicate& pred,
+    const storage_t<Tables...>& db,
+    serialize_context& ctx)
+{
+    std::string sql;
+    walk_delete_predicate<true>(pred, db, ctx, sql);
+    return sql;
+}
+
+} // namespace detail
 
 // ---------------------------------------------------------------------------
 // remove_query
@@ -34,10 +216,8 @@ struct remove_query {
     // -----------------------------------------------------------------------
     // .where(predicate)
     // -----------------------------------------------------------------------
-    template<typename P>
-        requires is_predicate<P>
-    auto where(P&& p) &&
-        -> remove_query<Entity, std::remove_cvref_t<P>>
+    template<typename P> requires is_predicate<P>
+    auto where(P&& p) && -> remove_query<Entity, std::remove_cvref_t<P>>
     {
         /*
          * IMPLEMENTATION GUIDE:
@@ -67,30 +247,21 @@ struct remove_query {
          * Hint:
          *   return remove_query<Entity, std::remove_cvref_t<P>>{std::forward<P>(p)};
          */
+        return remove_query<Entity, std::remove_cvref_t<P>>{std::forward<P>(p)};
     }
 
     // -----------------------------------------------------------------------
     // .to_sql(db)
     // -----------------------------------------------------------------------
     template<typename... Tables>
-    [[nodiscard]] std::string
-    to_sql(const storage_t<Tables...>& db) const
+    [[nodiscard]] std::string to_sql(const storage_t<Tables...>& db) const
     {
         /*
-         * IMPLEMENTATION GUIDE:
-         *
-         * What this function does:
-         *   Serialises the DELETE query to a parameterised SQL string.
-         *
-         * Step 1 — Resolve the table name: db.get_table<Entity>().name.
-         * Step 2 — Create serialize_context ctx{}.
-         * Step 3 — Build "DELETE FROM <table>".
-         * Step 4 — If Predicate != std::monostate, append
-         *           " WHERE " + serialize_predicate(where_pred, db, ctx).
-         * Step 5 — Return the SQL string.
+         * Serialises the DELETE query to a parameterised SQL string.
          *
          * Key types involved:
-         *   - serialize_predicate: sql_serialize.hpp.
+         *   - detail::serialize_delete_predicate: emits WHERE SQL without
+         *     introducing table aliases into DELETE statements.
          *   - serialize_context: accumulates $N params.
          *
          * Preconditions:
@@ -104,15 +275,14 @@ struct remove_query {
          *   - DELETE does not support table aliases in all PostgreSQL versions;
          *     use only the bare table name, not "DELETE FROM users u".
          *
-         * Hint:
-         *   std::string sql = "DELETE FROM ";
-         *   sql += db.get_table<Entity>().name;
-         *   if constexpr (!std::is_same_v<Predicate, std::monostate>) {
-         *       serialize_context ctx{};
-         *       sql += " WHERE " + serialize_predicate(where_pred, db, ctx);
-         *   }
-         *   return sql;
          */
+        const auto& table = db.template get_table<Entity>();
+        std::string sql = "DELETE FROM " + std::string(table.name);
+        if constexpr (!std::is_same_v<Predicate, std::monostate>) {
+            serialize_context ctx{};
+            sql += " WHERE " + detail::serialize_delete_predicate(where_pred, db, ctx);
+        }
+        return sql;
     }
 
     // -----------------------------------------------------------------------
@@ -121,17 +291,17 @@ struct remove_query {
     [[nodiscard]] std::vector<std::string> params() const
     {
         /*
-         * IMPLEMENTATION GUIDE:
-         *
-         * What this function does:
          *   Returns the WHERE clause parameter strings.
-         *
-         * Step 1 — If Predicate == std::monostate, return an empty vector.
-         * Step 2 — Otherwise replicate the WHERE traversal from to_sql()
-         *           and return ctx.params.
-         *
-         * Hint: share a private helper or duplicate the small traversal.
          */
+        if constexpr (std::is_same_v<Predicate, std::monostate>) 
+        {
+            return {};
+        }
+         else {
+            serialize_context ctx{};
+            detail::collect_predicate_params(where_pred, ctx);
+            return std::move(ctx.params);
+        }
     }
 };
 
@@ -143,15 +313,10 @@ template<typename Entity>
 constexpr auto remove() -> remove_query<Entity>
 {
     /*
-     * IMPLEMENTATION GUIDE:
-     *
      * What this function does:
      *   Returns a default-constructed remove_query with no WHERE predicate.
-     *
-     * Step 1 — Return remove_query<Entity>{}.
-     *
-     * Hint: return remove_query<Entity>{};
      */
+    return remove_query<Entity>{};
 }
 
 } // namespace atlas

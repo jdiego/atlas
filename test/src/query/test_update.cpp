@@ -3,7 +3,7 @@
 // Covers .set(), .where(), to_sql(), and params().
 // Link-time failure expected until implementations are provided.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/update.hpp"
 #include "atlas/schema/column.hpp"
@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entity & schema
@@ -37,68 +40,66 @@ static auto make_db() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// TEST: atlas::update<Entity>() factory
-// ---------------------------------------------------------------------------
+ut::suite<"query/update"> update_suite = [] {
+    using namespace ut;
 
-TEST_CASE("update() factory returns default update_query", "[update][factory]") {
+    // -----------------------------------------------------------------------
+    // atlas::update<Entity>() factory
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — initial state") {
+    "update() returns default update_query"_test = [] {
         auto q = atlas::update<User>();
 
         using expected_t = atlas::update_query<User>;
         static_assert(std::is_same_v<decltype(q), expected_t>);
         static_assert(std::tuple_size_v<decltype(q.set_clauses)> == 0u);
         static_assert(std::is_same_v<decltype(q.where_pred), std::monostate>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .set()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .set()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("update().set() accumulates SET clauses", "[update][set]") {
-
-    SECTION("happy path — single column") {
+    "set() adds a single SET clause"_test = [] {
         auto q = atlas::update<User>().set(&User::name, std::string{"Alice2"});
 
         static_assert(std::tuple_size_v<decltype(q.set_clauses)> == 1u);
 
         const auto& c = std::get<0>(q.set_clauses);
-        CHECK(c.col.ptr == &User::name);
-        CHECK(c.val.value == "Alice2");
-    }
+        expect(c.col.ptr == &User::name);
+        expect(c.val.value == "Alice2");
+    };
 
-    SECTION("happy path — two columns") {
+    "set() accumulates two SET clauses"_test = [] {
         auto q = atlas::update<User>()
             .set(&User::name,  std::string{"Bob"})
             .set(&User::email, std::string{"b@c.com"});
 
         static_assert(std::tuple_size_v<decltype(q.set_clauses)> == 2u);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — integer column") {
+    "set() accepts integer column"_test = [] {
         auto q = atlas::update<User>().set(&User::age, 99);
         const auto& c = std::get<0>(q.set_clauses);
-        CHECK(c.val.value == 99);
-    }
-}
+        expect(c.val.value == 99);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .where()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .where()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("update().where() attaches WHERE predicate", "[update][where]") {
-
-    SECTION("happy path — eq predicate") {
+    "where() attaches eq predicate"_test = [] {
         auto q = atlas::update<User>()
             .set(&User::name, std::string{"Alice2"})
             .where(atlas::eq(&User::id, 1));
 
         static_assert(atlas::is_predicate<decltype(q.where_pred)>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — compound predicate") {
+    "where() attaches compound predicate"_test = [] {
         auto q = atlas::update<User>()
             .set(&User::age, 21)
             .where(atlas::and_(
@@ -106,28 +107,27 @@ TEST_CASE("update().where() attaches WHERE predicate", "[update][where]") {
                 atlas::eq(&User::email, std::string{"a@b.com"})
             ));
         static_assert(atlas::is_predicate<decltype(q.where_pred)>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: to_sql() + params()
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // to_sql() + params()
+    // -----------------------------------------------------------------------
 
-TEST_CASE("update().to_sql() produces correct UPDATE statement", "[update][to_sql]") {
-    auto db = make_db();
-
-    SECTION("happy path — one SET + WHERE") {
+    "update with one SET and WHERE produces correct SQL"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::update<User>()
                        .set(&User::name, std::string{"Alice2"})
                        .where(atlas::eq(&User::id, 1));
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "UPDATE users SET name = $1 WHERE id = $2");
-        CHECK(prm == std::vector<std::string>{"Alice2", "1"});
-    }
+        expect(sql == "UPDATE users SET name = $1 WHERE id = $2");
+        expect(prm == std::vector<std::string>{"Alice2", "1"});
+    };
 
-    SECTION("edge case — two SET columns + WHERE") {
+    "update with two SET columns and WHERE"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::update<User>()
                        .set(&User::name,  std::string{"Bob"})
                        .set(&User::email, std::string{"b@c.com"})
@@ -135,18 +135,19 @@ TEST_CASE("update().to_sql() produces correct UPDATE statement", "[update][to_sq
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "UPDATE users SET name = $1, email = $2 WHERE id = $3");
-        REQUIRE(prm.size() == 3u);
-        CHECK(prm[0] == "Bob");
-        CHECK(prm[1] == "b@c.com");
-        CHECK(prm[2] == "5");
-    }
+        expect(sql == "UPDATE users SET name = $1, email = $2 WHERE id = $3");
+        expect(prm.size() == 3_u);
+        expect(prm[0] == "Bob");
+        expect(prm[1] == "b@c.com");
+        expect(prm[2] == "5");
+    };
 
-    SECTION("edge case — no WHERE (full-table update)") {
+    "update without WHERE produces full-table UPDATE"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::update<User>().set(&User::age, 0);
         auto sql = q.to_sql(db);
 
-        CHECK(sql.find("WHERE") == std::string::npos);
-        CHECK(sql.find("UPDATE users") != std::string::npos);
-    }
-}
+        expect(sql.find("WHERE") == std::string::npos);
+        expect(sql.find("UPDATE users") != std::string::npos);
+    };
+};

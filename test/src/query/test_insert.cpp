@@ -3,7 +3,7 @@
 // Covers full-object mode (.value()), partial mode (.set()), to_sql(), and
 // params().  Link-time failure expected until implementations are provided.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/insert.hpp"
 #include "atlas/schema/column.hpp"
@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entity & schema
@@ -37,130 +40,124 @@ static auto make_db() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// TEST: atlas::insert<Entity>() factory
-// ---------------------------------------------------------------------------
+ut::suite<"query/insert"> insert_suite = [] {
+    using namespace ut;
 
-TEST_CASE("insert() factory returns a default insert_query", "[insert][factory]") {
+    // -----------------------------------------------------------------------
+    // atlas::insert<Entity>() factory
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — initial state") {
+    "insert() returns a default insert_query"_test = [] {
         auto q = atlas::insert<User>();
 
         using expected_t = atlas::insert_query<User>;
         static_assert(std::is_same_v<decltype(q), expected_t>);
 
-        CHECK(q.full_object_mode == false);
-        CHECK(std::tuple_size_v<decltype(q.set_clauses)> == 0u);
-    }
-}
+        expect(q.full_object_mode == false);
+        expect(std::tuple_size_v<decltype(q.set_clauses)> == 0_u);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .value(entity) — full-object mode
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .value(entity) — full-object mode
+    // -----------------------------------------------------------------------
 
-TEST_CASE("insert().value(e) enables full-object mode", "[insert][value]") {
-
-    SECTION("happy path — stores entity and sets flag") {
+    "value() stores entity and enables full-object mode"_test = [] {
         User u{1, "Alice", "alice@corp.com", 30};
         auto q = atlas::insert<User>().value(u);
 
-        CHECK(q.full_object_mode == true);
-    }
+        expect(q.full_object_mode == true);
+    };
 
-    SECTION("edge case — default-constructed entity") {
+    "value() accepts default-constructed entity"_test = [] {
         User empty{};
         auto q = atlas::insert<User>().value(empty);
-        CHECK(q.full_object_mode == true);
-    }
-}
+        expect(q.full_object_mode == true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: .set() — partial mode
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // .set() — partial mode
+    // -----------------------------------------------------------------------
 
-TEST_CASE("insert().set() accumulates set_clauses", "[insert][set]") {
-
-    SECTION("happy path — one column") {
+    "set() accumulates one SET clause"_test = [] {
         auto q = atlas::insert<User>()
             .set(&User::name, std::string{"Bob"});
 
         static_assert(std::tuple_size_v<decltype(q.set_clauses)> == 1u);
 
         const auto& clause = std::get<0>(q.set_clauses);
-        CHECK(clause.col.ptr == &User::name);
-        CHECK(clause.val.value == "Bob");
-    }
+        expect(clause.col.ptr == &User::name);
+        expect(clause.val.value == "Bob");
+    };
 
-    SECTION("happy path — two columns") {
+    "set() accumulates two SET clauses"_test = [] {
         auto q = atlas::insert<User>()
             .set(&User::name,  std::string{"Bob"})
             .set(&User::email, std::string{"bob@corp.com"});
 
         static_assert(std::tuple_size_v<decltype(q.set_clauses)> == 2u);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — integer column") {
+    "set() accepts integer column"_test = [] {
         auto q = atlas::insert<User>().set(&User::age, 25);
         const auto& clause = std::get<0>(q.set_clauses);
-        CHECK(clause.val.value == 25);
-    }
-}
+        expect(clause.val.value == 25);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: to_sql() + params() — full-object mode
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // to_sql() + params() — full-object mode
+    // -----------------------------------------------------------------------
 
-TEST_CASE("insert().value(e).to_sql() produces full INSERT statement", "[insert][to_sql]") {
-    auto db = make_db();
-    User u{1, "Alice", "alice@corp.com", 30};
+    "full-object insert produces complete INSERT statement"_test = [] {
+        auto db = make_db();
+        User u{1, "Alice", "alice@corp.com", 30};
 
-    SECTION("happy path") {
         auto q   = atlas::insert<User>().value(u);
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "INSERT INTO users (id, name, email, age) VALUES ($1, $2, $3, $4)");
-        CHECK(prm == std::vector<std::string>{"1", "Alice", "alice@corp.com", "30"});
-    }
+        expect(sql == "INSERT INTO users (id, name, email, age) VALUES ($1, $2, $3, $4)");
+        expect(prm == std::vector<std::string>{"1", "Alice", "alice@corp.com", "30"});
+    };
 
-    SECTION("edge case — default-constructed entity (all zero / empty)") {
+    "full-object insert with default-constructed entity emits zero/empty params"_test = [] {
+        auto db = make_db();
         User empty{};
         auto q   = atlas::insert<User>().value(empty);
+        expect(q.to_sql(db) == "INSERT INTO users (id, name, email, age) VALUES ($1, $2, $3, $4)");
         auto prm = q.params();
 
-        REQUIRE(prm.size() == 4u);
-        CHECK(prm[0] == "0");   // id
-        CHECK(prm[1].empty());  // name
-        CHECK(prm[2].empty());  // email
-        CHECK(prm[3] == "0");   // age
-    }
-}
+        expect(prm.size() == 4_u);
+        expect(prm[0] == "0");   // id
+        expect(prm[1].empty());  // name
+        expect(prm[2].empty());  // email
+        expect(prm[3] == "0");   // age
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: to_sql() + params() — partial mode
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // to_sql() + params() — partial mode
+    // -----------------------------------------------------------------------
 
-TEST_CASE("insert().set().to_sql() produces partial INSERT statement", "[insert][to_sql_partial]") {
-    auto db = make_db();
-
-    SECTION("happy path — two columns") {
+    "partial insert with two columns produces partial INSERT"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::insert<User>()
                        .set(&User::name,  std::string{"Bob"})
                        .set(&User::email, std::string{"bob@corp.com"});
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "INSERT INTO users (name, email) VALUES ($1, $2)");
-        CHECK(prm == std::vector<std::string>{"Bob", "bob@corp.com"});
-    }
+        expect(sql == "INSERT INTO users (name, email) VALUES ($1, $2)");
+        expect(prm == std::vector<std::string>{"Bob", "bob@corp.com"});
+    };
 
-    SECTION("edge case — single column") {
+    "partial insert with single column"_test = [] {
+        auto db  = make_db();
         auto q   = atlas::insert<User>().set(&User::name, std::string{"Anon"});
         auto sql = q.to_sql(db);
         auto prm = q.params();
 
-        CHECK(sql == "INSERT INTO users (name) VALUES ($1)");
-        REQUIRE(prm.size() == 1u);
-        CHECK(prm[0] == "Anon");
-    }
-}
+        expect(sql == "INSERT INTO users (name) VALUES ($1)");
+        expect(prm.size() == 1_u);
+        expect(prm[0] == "Anon");
+    };
+};

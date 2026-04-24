@@ -56,6 +56,8 @@ std::string serialize_context::next_param(std::string value)
      *   ++param_counter;
      *   return placeholder;
      */
+    this->params.push_back(std::move(value));
+    return "$" + std::to_string(this->param_counter++);
 }
 
 } // namespace atlas

@@ -3,7 +3,7 @@
 // Verifies factory return types, node field values, is_predicate concept, and
 // composition via and_/or_/not_.
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/predicate.hpp"
 
@@ -11,6 +11,8 @@
 #include <string>
 #include <type_traits>
 #include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entity
@@ -24,13 +26,14 @@ struct User {
     double      score{};
 };
 
-// ---------------------------------------------------------------------------
-// TEST: eq factory
-// ---------------------------------------------------------------------------
+ut::suite<"query/predicate"> predicate_suite = [] {
+    using namespace ut;
 
-TEST_CASE("eq() produces eq_expr with correct lhs/rhs types", "[predicate][eq]") {
+    // -----------------------------------------------------------------------
+    // eq factory
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path — int column, int value") {
+    "eq() produces eq_expr with int column and int value"_test = [] {
         auto pred = atlas::eq(&User::id, 42);
 
         using expected_t = atlas::eq_expr<
@@ -38,105 +41,100 @@ TEST_CASE("eq() produces eq_expr with correct lhs/rhs types", "[predicate][eq]")
             atlas::literal<int>>;
         static_assert(std::is_same_v<decltype(pred), expected_t>);
 
-        REQUIRE(pred.lhs.ptr == &User::id);
-        REQUIRE(pred.rhs.value == 42);
-    }
+        expect(pred.lhs.ptr == &User::id);
+        expect(pred.rhs.value == 42);
+    };
 
-    SECTION("happy path — string column, string value") {
+    "eq() produces eq_expr with string column and string value"_test = [] {
         auto pred = atlas::eq(&User::email, std::string{"a@b.com"});
 
-        REQUIRE(pred.lhs.ptr == &User::email);
-        REQUIRE(pred.rhs.value == "a@b.com");
-    }
+        expect(pred.lhs.ptr == &User::email);
+        expect(pred.rhs.value == "a@b.com");
+    };
 
-    SECTION("edge case — value zero") {
+    "eq() supports zero value"_test = [] {
         auto pred = atlas::eq(&User::age, 0);
-        REQUIRE(pred.rhs.value == 0);
-    }
-}
+        expect(pred.rhs.value == 0);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: ne, lt, gt, lte, gte, like factories
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Comparison factories
+    // -----------------------------------------------------------------------
 
-TEST_CASE("comparison factory functions produce the correct node types", "[predicate][comparison]") {
-
-    SECTION("ne") {
+    "ne() produces ne_expr"_test = [] {
         auto p = atlas::ne(&User::age, 18);
         static_assert(std::is_same_v<decltype(p),
-            atlas::ne_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-        REQUIRE(p.lhs.ptr == &User::age);
-    }
+            atlas::ne_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        expect(p.lhs.ptr == &User::age);
+    };
 
-    SECTION("lt") {
+    "lt() produces lt_expr"_test = [] {
         auto p = atlas::lt(&User::age, 30);
         static_assert(std::is_same_v<decltype(p),
-            atlas::lt_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-    }
+            atlas::lt_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        expect(true);
+    };
 
-    SECTION("gt") {
+    "gt() produces gt_expr with double column"_test = [] {
         auto p = atlas::gt(&User::score, 0.5);
         static_assert(std::is_same_v<decltype(p),
-            atlas::gt_expr<atlas::column_ref<User,double>, atlas::literal<double>>>);
-        REQUIRE(p.rhs.value == 0.5);
-    }
+            atlas::gt_expr<atlas::column_ref<User, double>, atlas::literal<double>>>);
+        expect(p.rhs.value == 0.5);
+    };
 
-    SECTION("lte") {
+    "lte() produces lte_expr"_test = [] {
         auto p = atlas::lte(&User::age, 65);
         static_assert(std::is_same_v<decltype(p),
-            atlas::lte_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-    }
+            atlas::lte_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        expect(true);
+    };
 
-    SECTION("gte") {
+    "gte() produces gte_expr"_test = [] {
         auto p = atlas::gte(&User::id, 1);
         static_assert(std::is_same_v<decltype(p),
-            atlas::gte_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-    }
+            atlas::gte_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        expect(true);
+    };
 
-    SECTION("like — pattern string") {
+    "like() produces like_expr with pattern string"_test = [] {
         auto p = atlas::like(&User::email, std::string{"%@corp.com"});
         static_assert(std::is_same_v<decltype(p),
             atlas::like_expr<
-                atlas::column_ref<User,std::string>,
+                atlas::column_ref<User, std::string>,
                 atlas::literal<std::string>>>);
-        REQUIRE(p.rhs.value == "%@corp.com");
-    }
-}
+        expect(p.rhs.value == "%@corp.com");
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: is_null / is_not_null
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // is_null / is_not_null
+    // -----------------------------------------------------------------------
 
-TEST_CASE("is_null and is_not_null factories", "[predicate][null]") {
-
-    SECTION("is_null — correct type") {
+    "is_null() produces is_null_expr"_test = [] {
         auto p = atlas::is_null(&User::name);
         static_assert(std::is_same_v<decltype(p),
             atlas::is_null_expr<atlas::column_ref<User, std::string>>>);
-        REQUIRE(p.col.ptr == &User::name);
-    }
+        expect(p.col.ptr == &User::name);
+    };
 
-    SECTION("is_not_null — correct type") {
+    "is_not_null() produces is_not_null_expr"_test = [] {
         auto p = atlas::is_not_null(&User::name);
         static_assert(std::is_same_v<decltype(p),
             atlas::is_not_null_expr<atlas::column_ref<User, std::string>>>);
-        REQUIRE(p.col.ptr == &User::name);
-    }
+        expect(p.col.ptr == &User::name);
+    };
 
-    SECTION("edge case — is_null on integer column") {
+    "is_null() works on integer column"_test = [] {
         auto p = atlas::is_null(&User::id);
         static_assert(std::is_same_v<decltype(p),
             atlas::is_null_expr<atlas::column_ref<User, int32_t>>>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: in factory
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // in factory
+    // -----------------------------------------------------------------------
 
-TEST_CASE("in() factory stores column ref and values container", "[predicate][in]") {
-
-    SECTION("happy path — vector of ints") {
+    "in() stores column ref and vector of ints"_test = [] {
         std::vector<int32_t> ids{1, 2, 3};
         auto p = atlas::in(&User::id, ids);
 
@@ -145,31 +143,28 @@ TEST_CASE("in() factory stores column ref and values container", "[predicate][in
                 atlas::column_ref<User, int32_t>,
                 std::vector<int32_t>>>);
 
-        REQUIRE(p.col.ptr == &User::id);
-        REQUIRE(p.values.size() == 3u);
-    }
+        expect(p.col.ptr == &User::id);
+        expect(p.values.size() == 3_u);
+    };
 
-    SECTION("edge case — empty container") {
+    "in() accepts empty container"_test = [] {
         std::vector<int32_t> empty;
         auto p = atlas::in(&User::id, empty);
-        REQUIRE(p.values.empty());
-    }
+        expect(p.values.empty());
+    };
 
-    SECTION("edge case — single-element container") {
+    "in() accepts single-element container"_test = [] {
         std::vector<int32_t> one{42};
         auto p = atlas::in(&User::id, std::move(one));
-        REQUIRE(p.values.size() == 1u);
-        REQUIRE(p.values[0] == 42);
-    }
-}
+        expect(p.values.size() == 1_u);
+        expect(p.values[0] == 42);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: and_ / or_ / not_ combinators
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // and_ / or_ / not_ combinators
+    // -----------------------------------------------------------------------
 
-TEST_CASE("and_() combines two predicates into and_expr", "[predicate][combinator]") {
-
-    SECTION("happy path — two leaf predicates") {
+    "and_() combines two leaf predicates"_test = [] {
         auto p = atlas::and_(
             atlas::gt(&User::age, 18),
             atlas::like(&User::email, std::string{"%@corp.com"})
@@ -178,68 +173,66 @@ TEST_CASE("and_() combines two predicates into and_expr", "[predicate][combinato
         static_assert(atlas::is_predicate<decltype(p)>);
         static_assert(std::is_same_v<
             decltype(p.lhs),
-            atlas::gt_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-    }
+            atlas::gt_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        expect(true);
+    };
 
-    SECTION("edge case — nested and_") {
+    "and_() supports nested and_"_test = [] {
         auto p = atlas::and_(
             atlas::and_(atlas::eq(&User::id, 1), atlas::eq(&User::age, 30)),
             atlas::eq(&User::id, 2)
         );
         static_assert(atlas::is_predicate<decltype(p)>);
-    }
-}
+        expect(true);
+    };
 
-TEST_CASE("or_() combines two predicates into or_expr", "[predicate][combinator]") {
-
-    SECTION("happy path") {
+    "or_() combines two predicates"_test = [] {
         auto p = atlas::or_(
             atlas::eq(&User::id, 1),
             atlas::eq(&User::id, 2)
         );
         static_assert(atlas::is_predicate<decltype(p)>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — or_ of and_ nodes") {
+    "or_() accepts and_ children"_test = [] {
         auto p = atlas::or_(
-            atlas::and_(atlas::eq(&User::id,1), atlas::eq(&User::age,20)),
+            atlas::and_(atlas::eq(&User::id, 1), atlas::eq(&User::age, 20)),
             atlas::eq(&User::id, 99)
         );
         static_assert(atlas::is_predicate<decltype(p)>);
-    }
-}
+        expect(true);
+    };
 
-TEST_CASE("not_() wraps a predicate in not_expr", "[predicate][combinator]") {
-
-    SECTION("happy path") {
+    "not_() wraps a predicate"_test = [] {
         auto p = atlas::not_(atlas::eq(&User::id, 0));
         static_assert(atlas::is_predicate<decltype(p)>);
-    }
+        expect(true);
+    };
 
-    SECTION("edge case — double negation") {
+    "not_() supports double negation"_test = [] {
         auto p = atlas::not_(atlas::not_(atlas::eq(&User::id, 1)));
         static_assert(atlas::is_predicate<decltype(p)>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: is_predicate concept
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // is_predicate concept
+    // -----------------------------------------------------------------------
 
-TEST_CASE("is_predicate concept accepts all node types and rejects non-nodes",
-          "[predicate][concept]") {
+    "is_predicate accepts node types and rejects non-nodes"_test = [] {
+        static_assert(atlas::is_predicate<
+            atlas::eq_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>);
+        static_assert(atlas::is_predicate<atlas::and_expr<
+            atlas::eq_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>,
+            atlas::eq_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>>);
+        static_assert(atlas::is_predicate<atlas::not_expr<
+            atlas::eq_expr<atlas::column_ref<User, int32_t>, atlas::literal<int>>>>);
 
-    static_assert(atlas::is_predicate<atlas::eq_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>);
-    static_assert(atlas::is_predicate<atlas::and_expr<
-        atlas::eq_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>,
-        atlas::eq_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>>);
-    static_assert(atlas::is_predicate<atlas::not_expr<
-        atlas::eq_expr<atlas::column_ref<User,int32_t>, atlas::literal<int>>>>);
+        static_assert(!atlas::is_predicate<int>);
+        static_assert(!atlas::is_predicate<atlas::column_ref<User, int32_t>>);
+        static_assert(!atlas::is_predicate<atlas::literal<int>>);
 
-    // Non-predicates
-    static_assert(!atlas::is_predicate<int>);
-    static_assert(!atlas::is_predicate<atlas::column_ref<User,int32_t>>);
-    static_assert(!atlas::is_predicate<atlas::literal<int>>);
-
-    CHECK(true); // all static_asserts passed
-}
+        expect(true);
+    };
+};

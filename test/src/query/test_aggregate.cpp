@@ -3,7 +3,7 @@
 // Verifies aggregate node types, factories, is_aggregate concept, and
 // integration with atlas::select().
 
-#include <catch2/catch_test_macros.hpp>
+#include <boost/ut.hpp>
 
 #include "atlas/query/aggregate.hpp"
 #include "atlas/query/select.hpp"
@@ -15,6 +15,9 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
+
+namespace ut = boost::ut;
 
 // ---------------------------------------------------------------------------
 // Test entity & schema
@@ -38,121 +41,117 @@ static auto make_db() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// TEST: count(member_ptr)
-// ---------------------------------------------------------------------------
+ut::suite<"query/aggregate"> aggregate_suite = [] {
+    using namespace ut;
 
-TEST_CASE("count(col) wraps column_ref in count_expr", "[aggregate][count]") {
+    // -----------------------------------------------------------------------
+    // count(member_ptr)
+    // -----------------------------------------------------------------------
 
-    SECTION("happy path") {
+    "count(col) wraps column_ref in count_expr"_test = [] {
         auto agg = atlas::count(&User::id);
         using expected_t = atlas::count_expr<atlas::column_ref<User, int32_t>>;
         static_assert(std::is_same_v<decltype(agg), expected_t>);
-        CHECK(agg.col.ptr == &User::id);
-    }
+        expect(agg.col.ptr == &User::id);
+    };
 
-    SECTION("edge case — count on string column") {
+    "count() works on string column"_test = [] {
         auto agg = atlas::count(&User::name);
         static_assert(std::is_same_v<decltype(agg),
             atlas::count_expr<atlas::column_ref<User, std::string>>>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: count() — count star
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // count() — count star
+    // -----------------------------------------------------------------------
 
-TEST_CASE("count() with no args returns count_star_expr", "[aggregate][count_star]") {
-
-    SECTION("happy path") {
+    "count() with no args returns count_star_expr"_test = [] {
         auto agg = atlas::count();
         static_assert(std::is_same_v<decltype(agg), atlas::count_star_expr>);
-    }
+        expect(true);
+    };
 
-    SECTION("is_aggregate concept satisfied") {
+    "count_star_expr satisfies is_aggregate"_test = [] {
         static_assert(atlas::is_aggregate<atlas::count_star_expr>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: sum, avg, min, max
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // sum, avg, min, max
+    // -----------------------------------------------------------------------
 
-TEST_CASE("sum/avg/min/max factories produce correct node types", "[aggregate][agg_fns]") {
-
-    SECTION("sum") {
+    "sum() produces sum_expr"_test = [] {
         auto agg = atlas::sum(&User::score);
         static_assert(std::is_same_v<decltype(agg),
             atlas::sum_expr<atlas::column_ref<User, double>>>);
-        CHECK(agg.col.ptr == &User::score);
-    }
+        expect(agg.col.ptr == &User::score);
+    };
 
-    SECTION("avg") {
+    "avg() produces avg_expr"_test = [] {
         auto agg = atlas::avg(&User::score);
         static_assert(std::is_same_v<decltype(agg),
             atlas::avg_expr<atlas::column_ref<User, double>>>);
-    }
+        expect(true);
+    };
 
-    SECTION("min") {
+    "min() produces min_expr"_test = [] {
         auto agg = atlas::min(&User::age);
         static_assert(std::is_same_v<decltype(agg),
             atlas::min_expr<atlas::column_ref<User, int32_t>>>);
-    }
+        expect(true);
+    };
 
-    SECTION("max") {
+    "max() produces max_expr"_test = [] {
         auto agg = atlas::max(&User::age);
         static_assert(std::is_same_v<decltype(agg),
             atlas::max_expr<atlas::column_ref<User, int32_t>>>);
-    }
-}
+        expect(true);
+    };
 
-// ---------------------------------------------------------------------------
-// TEST: is_aggregate concept
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // is_aggregate concept
+    // -----------------------------------------------------------------------
 
-TEST_CASE("is_aggregate concept accepts all node types and rejects others",
-          "[aggregate][concept]") {
+    "is_aggregate accepts node types and rejects others"_test = [] {
+        static_assert(atlas::is_aggregate<atlas::count_expr<atlas::column_ref<User, int32_t>>>);
+        static_assert(atlas::is_aggregate<atlas::sum_expr<atlas::column_ref<User, double>>>);
+        static_assert(atlas::is_aggregate<atlas::avg_expr<atlas::column_ref<User, double>>>);
+        static_assert(atlas::is_aggregate<atlas::min_expr<atlas::column_ref<User, int32_t>>>);
+        static_assert(atlas::is_aggregate<atlas::max_expr<atlas::column_ref<User, int32_t>>>);
+        static_assert(atlas::is_aggregate<atlas::count_star_expr>);
 
-    static_assert(atlas::is_aggregate<atlas::count_expr<atlas::column_ref<User,int32_t>>>);
-    static_assert(atlas::is_aggregate<atlas::sum_expr<atlas::column_ref<User,double>>>);
-    static_assert(atlas::is_aggregate<atlas::avg_expr<atlas::column_ref<User,double>>>);
-    static_assert(atlas::is_aggregate<atlas::min_expr<atlas::column_ref<User,int32_t>>>);
-    static_assert(atlas::is_aggregate<atlas::max_expr<atlas::column_ref<User,int32_t>>>);
-    static_assert(atlas::is_aggregate<atlas::count_star_expr>);
+        static_assert(!atlas::is_aggregate<int>);
+        static_assert(!atlas::is_aggregate<atlas::column_ref<User, int32_t>>);
+        static_assert(!atlas::is_aggregate<atlas::literal<int>>);
 
-    // Non-aggregates
-    static_assert(!atlas::is_aggregate<int>);
-    static_assert(!atlas::is_aggregate<atlas::column_ref<User, int32_t>>);
-    static_assert(!atlas::is_aggregate<atlas::literal<int>>);
+        expect(true);
+    };
 
-    CHECK(true);
-}
+    // -----------------------------------------------------------------------
+    // aggregate in select()
+    // -----------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// TEST: aggregate in select()
-// ---------------------------------------------------------------------------
-
-TEST_CASE("select() accepts aggregate expressions alongside column_refs",
-          "[aggregate][select_integration]") {
-
-    SECTION("happy path — COUNT(*) in select") {
+    "select(count()) accepts COUNT(*) expression"_test = [] {
         auto q = atlas::select(atlas::count())
             .from<User>()
             .where(atlas::gt(&User::age, 18));
 
         static_assert(atlas::is_aggregate<
-            std::tuple_element_t<0, decltype(q.col_refs)>>);
-    }
+            std::tuple_element_t<0, decltype(q.selected)>>);
+        expect(true);
+    };
 
-    SECTION("happy path — COUNT(col) in select") {
+    "select(count(col)) accepts COUNT(col) expression"_test = [] {
         auto q = atlas::select(atlas::count(&User::id))
             .from<User>();
 
         static_assert(atlas::is_aggregate<
-            std::tuple_element_t<0, decltype(q.col_refs)>>);
-    }
+            std::tuple_element_t<0, decltype(q.selected)>>);
+        expect(true);
+    };
 
-    SECTION("to_sql() — COUNT(*) with WHERE (link-time stub)") {
+    "to_sql() emits COUNT(*) with WHERE"_test = [] {
         auto db = make_db();
         auto q  = atlas::select(atlas::count())
                       .from<User>()
@@ -161,7 +160,7 @@ TEST_CASE("select() accepts aggregate expressions alongside column_refs",
         std::string sql = q.to_sql(db);
         auto prm        = q.params();
 
-        CHECK(sql == "SELECT COUNT(*) FROM users u WHERE u.age > $1");
-        CHECK(prm == std::vector<std::string>{"18"});
-    }
-}
+        expect(sql == "SELECT COUNT(*) FROM users u WHERE u.age > $1");
+        expect(prm == std::vector<std::string>{"18"});
+    };
+};
