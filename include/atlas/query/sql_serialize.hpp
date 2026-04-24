@@ -18,7 +18,6 @@
 #include <string_view>
 #include <type_traits>
 #include <vector>
-
 #include "atlas/query/aggregate.hpp"
 #include "atlas/query/expr.hpp"
 #include "atlas/query/predicate.hpp"
