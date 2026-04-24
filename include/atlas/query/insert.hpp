@@ -25,6 +25,7 @@
 #include "atlas/detail/type_utils.hpp"
 #include "atlas/query/expr.hpp"
 #include "atlas/query/sql_serialize.hpp"
+#include "atlas/schema/serde.hpp"
 #include "atlas/schema/storage.hpp"
 
 namespace atlas {
@@ -68,7 +69,6 @@ struct insert_query_impl {
     // set_clauses is ignored.
     bool full_object_mode = false;
     std::optional<Entity> entity_val;
-    mutable std::optional<std::vector<std::string>> params_cache;
 
     // -----------------------------------------------------------------------
     // .value(entity)
@@ -100,7 +100,6 @@ struct insert_query_impl {
          */
         entity_val = entity;
         full_object_mode = true;
-        params_cache = std::nullopt;
         return std::move(*this);
     }
 
@@ -133,7 +132,7 @@ struct insert_query_impl {
             std::move(set_clauses),
             std::make_tuple(SetClause{column_ref<Entity,T>{col}, literal<T>{std::move(val)}})
         );
-        return {std::move(new_clauses), false, std::nullopt, std::nullopt};
+        return {std::move(new_clauses), false, std::nullopt};
     }
 
     // -----------------------------------------------------------------------

@@ -51,7 +51,11 @@ get_target_property(ut_include_dirs Boost::ut INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(${TEST_SUITE} PRIVATE ${ut_SOURCE_DIR}/include)
 target_link_libraries(${TEST_SUITE} PRIVATE Boost::ut ${MODULE_NAME}::${MODULE_NAME})
 
+
 target_compile_features(${TEST_SUITE} PRIVATE cxx_std_23)
+
+# Disable Boost.UT C++20 modules (CI compilers may enable modules automatically)
+target_compile_definitions(${TEST_SUITE} PRIVATE BOOST_UT_DISABLE_MODULE)
 
 # ######################################################################################################################
 # Enable compiler warnings
