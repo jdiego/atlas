@@ -28,12 +28,13 @@
 #include <vector>
 #include <utility>
 
-#include "atlas/detail/type_utils.hpp"
+#include "atlas/query/source.hpp"
 #include "atlas/query/expr.hpp"
 #include "atlas/query/join.hpp"
 #include "atlas/query/predicate.hpp"
 #include "atlas/query/sql_serialize.hpp"
 #include "atlas/schema/storage.hpp"
+#include "atlas/detail/type_utils.hpp"
 
 namespace atlas {
 
