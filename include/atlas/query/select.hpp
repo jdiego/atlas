@@ -26,6 +26,7 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
+#include <utility>
 
 #include "atlas/detail/type_utils.hpp"
 #include "atlas/query/expr.hpp"
@@ -661,9 +662,11 @@ constexpr auto normalize_select_col(T &&t) -> std::remove_cvref_t<T> {
 // Factory: atlas::select(args...)
 // ---------------------------------------------------------------------------
 
+template<typename T>
+using select_expr_t = decltype(detail::normalize_select_col(std::declval<T>()));
+
 template <typename... Args>
-constexpr auto select(Args &&...args) 
-    -> select_query<decltype(detail::normalize_select_col(std::forward<Args>(args)))...> 
+constexpr auto select(Args &&...args) -> select_query<select_expr_t<Args&&>...> 
 {
     /*
      * What this function does:
