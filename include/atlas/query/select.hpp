@@ -48,7 +48,26 @@ struct order_by_clause {
     bool ascending = true;
 };
 
+
 } // namespace detail
+
+// ---------------------------------------------------------------------------
+// all_columns marker
+// ---------------------------------------------------------------------------
+
+template<typename Entity>
+struct all_columns_t {
+    using entity_type = Entity;
+};
+
+template<typename T>
+struct is_all_columns : std::false_type {};
+
+template<typename Entity>
+struct is_all_columns<all_columns_t<Entity>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_all_columns_v = is_all_columns<T>::value;
 
 // ---------------------------------------------------------------------------
 // select_query_impl — full template state
@@ -373,40 +392,54 @@ struct select_query_impl {
             }
         };
 
-        serialize_context ctx{};
-        std::string sql = "SELECT ";
         static_assert(std::tuple_size_v<Selected> > 0,
             "select_query::to_sql() requires at least one selected expression");
+
+        serialize_context ctx{};
+        std::string sql = "SELECT ";
+
         // `selected` is a heterogeneous tuple of SELECT expressions
-        // (`column_ref` and aggregate nodes). `std::apply` expands that tuple
-        // in declaration order so each element can be serialized without type
-        // erasure. `append_select` then uses `if constexpr` to dispatch at
-        // compile time to `serialize_column_ref()` or `serialize_aggregate()`,
-        // inserting ", " between items as needed.
-        if constexpr (std::tuple_size_v<Selected> > 0) {
-            bool first_select = true;
-            std::apply([&](const auto &...exprs) {
-                auto append_select = [&](const auto &expr) {
-                    using Expr = std::remove_cvref_t<decltype(expr)>;
-                    if (!first_select) {
-                        sql += ", ";
-                    }
-                    if constexpr (is_aggregate<Expr>) {
-                        sql += serialize_aggregate(expr, db);
-                    } 
-                    else if constexpr (is_column_ref<Expr>) {
-                        sql += serialize_column_ref(expr, db);
-                    } 
-                    else {
-                        static_assert(detail::always_false<Expr>, "select_query::to_sql(): unsupported SELECT expression");
-                    }
+        // (column_ref, aggregate nodes, all_columns_t markers). `std::apply`
+        // expands the tuple in declaration order so each element can be
+        // dispatched at compile time via `if constexpr`. The single
+        // `emit_separator` helper centralises comma placement so every leaf
+        // (including each column expanded out of an all_columns_t marker)
+        // inserts at most one preceding ", ".
+        bool first_select = true;
+        auto emit_separator = [&] {
+            if (!first_select) {
+                sql += ", ";
+            }
+            first_select = false;
+        };
 
-                    first_select = false;
-                };
+        std::apply([&](const auto &...exprs) {
+            auto append_select = [&](const auto &expr) {
+                using Expr = std::remove_cvref_t<decltype(expr)>;
+                if constexpr (is_aggregate<Expr>) {
+                    emit_separator();
+                    sql += serialize_aggregate(expr, db);
+                }
+                else if constexpr (is_column_ref<Expr>) {
+                    emit_separator();
+                    sql += serialize_column_ref(expr, db);
+                }
+                else if constexpr (is_all_columns_v<Expr>) {
+                    using AllEntity = typename Expr::entity_type;
+                    const auto& table = db.template get_table<AllEntity>();
+                    table.for_each_column([&](const auto& col) {
+                        emit_separator();
+                        sql += serialize_column_ref(column_ref{col.member_ptr}, db);
+                    });
+                }
+                else {
+                    static_assert(detail::always_false<Expr>,
+                        "select_query::to_sql(): unsupported SELECT expression");
+                }
+            };
 
-                (append_select(exprs), ...);
-            }, selected);
-        }
+            (append_select(exprs), ...);
+        }, selected);
         // Resolve the FROM table once; its metadata drives both the clause
         // itself and the default alias fallback used by column serialization.
         const auto &from_table = db.template get_table<FromEntity>();
@@ -564,47 +597,107 @@ constexpr auto normalize_select_col(T &&t) -> std::remove_cvref_t<T> {
 // ---------------------------------------------------------------------------
 
 template <typename... Args>
-constexpr auto select(Args &&...args) -> select_query<decltype(detail::normalize_select_col(std::forward<Args>(args)))...> {
+constexpr auto select(Args &&...args) 
+    -> select_query<decltype(detail::normalize_select_col(std::forward<Args>(args)))...> 
+{
     /*
-     * IMPLEMENTATION GUIDE:
-     *
      * What this function does:
-     *   Creates an empty select_query with the given column/aggregate
-     *   references.  Raw member pointers are wrapped in column_ref via
-     *   detail::normalize_select_col; aggregate nodes pass through unchanged.
-     *
-     * Step 1 — Normalise each argument with normalize_select_col.
-     * Step 2 — Pack the normalised refs into a std::tuple.
-     * Step 3 — Return a default-constructed select_query_impl with:
-     *           selected = std::tuple{normalize_select_col(args)...},
-     *           all other fields default-initialised.
+     *   Creates an empty select_query with the given select expressions.
+     *   Raw member pointers are wrapped in column_ref via
+     *   detail::normalize_select_col; aggregate nodes and all_columns_t<...>
+     *   markers pass through unchanged.
      *
      * Key types involved:
-     *   - detail::normalize_select_col: adapter that handles both raw member
-     *     pointers and aggregate/column_ref types uniformly.
+     *   - detail::normalize_select_col: adapter that handles raw member
+     *     pointers, aggregate/column_ref types, and all_columns_t<...>
+     *     markers uniformly.
      *
      * Preconditions:
      *   - At least one argument must be provided.
-     *   - Each argument must be either a member pointer or an is_aggregate
-     *     or is_column_ref type.
+     *   - Each argument must be either a member pointer, an is_aggregate
+     *     type, an is_column_ref type, or an all_columns_t<...> marker.
      *
      * Postconditions:
-     *   - Returned select_query carries all provided column/aggregate refs.
+     *   - Returned select_query carries all provided select expressions.
      *
      * Pitfalls:
      *   - Do not call normalize_select_col twice; compute the tuple in one pass.
-     *
-     * Hint:
-     *   return select_query<...>{
-     *       std::make_tuple(detail::normalize_select_col(std::forward<Args>(args))...),
-     *       {}, {}, {}, {}, std::nullopt, std::nullopt
-     *   };
      */
     static_assert(sizeof...(Args) > 0,
         "atlas::select() requires at least one column or aggregate");
 
     return {
         std::make_tuple(detail::normalize_select_col(std::forward<Args>(args))...),
+        {},
+        {},
+        {},
+        std::nullopt,
+        std::nullopt
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Factory: atlas::all<Entity>()
+// ---------------------------------------------------------------------------
+
+template<typename Entity>
+constexpr auto all() -> all_columns_t<Entity> {
+    /*
+     * What this function does:
+     *   Returns the all_columns_t marker so it can be passed to select() as
+     *   one of several SELECT expressions, e.g.:
+     *
+     *     atlas::select(atlas::all<User>(), &Post::title)
+     *         .from<User>()
+     *         .inner_join<Post>(...)
+     *
+     *   For a plain "SELECT * FROM Entity" prefer atlas::select_all<Entity>(),
+     *   which also stamps the FROM clause for you.
+     */
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Factory: atlas::select_all<Entity>()
+// ---------------------------------------------------------------------------
+
+template<typename Entity>
+constexpr auto select_all() {
+    /*
+     * What this function does:
+     *   Builds a "SELECT * FROM Entity" query in one step. The all_columns_t
+     *   marker is expanded during SQL serialization into Entity's full column
+     *   list (in table declaration order), and the FromEntity template
+     *   parameter is pre-stamped so calling .from<Entity>() is unnecessary.
+     *
+     *   Further chaining (.where, .order_by, .limit, .offset, .inner_join,
+     *   .left_join) is supported and behaves exactly as on a query produced
+     *   by atlas::select(...).from<Entity>().
+     *
+     * Preconditions:
+     *   - Entity must be registered in the storage_t passed to to_sql().
+     *
+     * Postconditions:
+     *   - to_sql(db) expands the marker into the mapped column list and
+     *     emits "FROM <table> <alias>".
+     *
+     * Pitfalls:
+     *   - Not emitted as a raw SQL '*'. Explicit column expansion keeps
+     *     serialization type-aware and preserves deterministic column order.
+     *   - Calling .from<Other>() afterwards rebinds FromEntity but leaves
+     *     all_columns_t<Entity> in the SELECT list, so to_sql() will still
+     *     expand Entity's columns. Don't do that.
+     */
+    using query_t = select_query_impl<
+        std::tuple<all_columns_t<Entity>>,
+        Entity,
+        std::monostate,
+        std::tuple<>,
+        std::tuple<>,
+        void
+    >;
+    return query_t{
+        std::make_tuple(all_columns_t<Entity>{}),
         {},
         {},
         {},

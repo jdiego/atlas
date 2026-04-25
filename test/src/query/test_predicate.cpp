@@ -26,6 +26,11 @@ struct User {
     double      score{};
 };
 
+template <typename Container>
+concept can_call_in_with_user_id = requires(Container ids) {
+    atlas::in(&User::id, ids);
+};
+
 ut::suite<"query/predicate"> predicate_suite = [] {
     using namespace ut;
 
@@ -158,6 +163,10 @@ ut::suite<"query/predicate"> predicate_suite = [] {
         auto p = atlas::in(&User::id, std::move(one));
         expect(p.values.size() == 1_u);
         expect(p.values[0] == 42);
+    };
+
+    "in() rejects containers whose value type does not match the column"_test = [] {
+        static_assert(!can_call_in_with_user_id<std::vector<std::string>>);
     };
 
     // -----------------------------------------------------------------------

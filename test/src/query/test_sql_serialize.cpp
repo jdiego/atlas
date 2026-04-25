@@ -1,10 +1,5 @@
-// Tests for atlas/query/sql_serialize.hpp + sql_serialize.cpp
-//
 // Uses mock storage (no libpq).
-// serialize_context::next_param tests will fail at link time until
-// sql_serialize.cpp is implemented.
-// serialize_column_ref and serialize_predicate tests require implementation.
-
+// Covers SQL serialization helpers and query predicate/column serialization.
 #include <boost/ut.hpp>
 
 #include "atlas/query/sql_serialize.hpp"

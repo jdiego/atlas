@@ -1,7 +1,6 @@
 // Tests for atlas/query/update.hpp
 //
 // Covers .set(), .where(), to_sql(), and params().
-// Link-time failure expected until implementations are provided.
 
 #include <boost/ut.hpp>
 

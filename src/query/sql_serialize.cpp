@@ -35,8 +35,8 @@ std::string serialize_context::next_param(std::string value)
      *   - param_counter (int): monotonically increasing, starts at 1.
      *
      * Preconditions:
-     *   - value must be a non-empty UTF-8 string representing the serialised
-     *     text value of one SQL parameter.
+     *   - value is the serialised text value of one SQL parameter.
+     *   - Empty strings are valid parameter values and are stored unchanged
      *
      * Postconditions:
      *   - params.size() == old_size + 1.

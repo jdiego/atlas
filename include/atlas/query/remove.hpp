@@ -27,21 +27,11 @@ namespace detail {
 
 template <typename Entity, typename T, typename Tag, typename... Tables>
 [[nodiscard]] inline std::string serialize_delete_column_ref(
-    const atlas::column_ref<Entity, T, Tag>& ref, 
+    const atlas::column_ref<Entity, T, Tag>& ref,
     const storage_t<Tables...>& db
 ){
     const auto& table = db.template get_table<Entity>();
-    std::string col_name;
-
-    table.for_each_column([&](const auto& col) {
-        if constexpr (std::is_same_v<decltype(col.member_ptr), decltype(ref.ptr)>) {
-            if (col.member_ptr == ref.ptr && col_name.empty()) {
-                col_name = std::string(col.name);
-            }
-        }
-    });
-
-    return col_name;
+    return std::string(table.find_column(ref.ptr).name);
 }
 
 template <bool EmitSql, typename Rhs, typename... Tables>

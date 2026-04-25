@@ -18,6 +18,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -202,15 +203,8 @@ struct insert_query_impl {
             if constexpr (std::tuple_size_v<SetClauses> > 0) {
                 std::apply([&](const auto&... clauses) {
                     auto append_clause = [&](const auto& clause) {
-                        std::string col_name;
-                        table.for_each_column([&](const auto& col) {
-                            if constexpr (std::is_same_v<decltype(col.member_ptr), decltype(clause.col.ptr)>) {
-                                if (col.member_ptr == clause.col.ptr && col_name.empty()) {
-                                    col_name = std::string(col.name);
-                                }
-                            }
-                        });
-                        append_binding(col_name, detail::serialize_value(clause.val.value));
+                        append_binding(table.find_column(clause.col.ptr).name,
+                                       detail::serialize_value(clause.val.value));
                     };
 
                     (append_clause(clauses), ...);

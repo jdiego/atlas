@@ -2,7 +2,6 @@
 //
 // Verifies join_clause struct, is_join_clause concept, and select_query
 // inner_join / left_join methods.
-// Link-time failure expected until implementations are provided.
 
 #include <boost/ut.hpp>
 
