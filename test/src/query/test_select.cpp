@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -35,6 +36,23 @@ struct Post {
     std::string title{};
 };
 
+struct Employee {
+    int32_t     id{};
+    int32_t     manager_id{};
+    std::string name{};
+};
+
+struct employee_alias {
+    static constexpr std::string_view alias = "e";
+};
+
+struct manager_alias {
+    static constexpr std::string_view alias = "m";
+};
+
+using employee_instance = atlas::table_instance<Employee, employee_alias>;
+using manager_instance = atlas::table_instance<Employee, manager_alias>;
+
 static auto make_db() {
     auto user_table = atlas::make_table<User>("users",
         atlas::make_column("id",    &User::id,    atlas::primary_key()),
@@ -48,6 +66,15 @@ static auto make_db() {
         atlas::make_column("title",   &Post::title,   atlas::not_null())
     );
     return atlas::make_storage(user_table, post_table);
+}
+
+static auto make_employee_db() {
+    auto employee_table = atlas::make_table<Employee>("employees",
+        atlas::make_column("id",         &Employee::id,         atlas::primary_key()),
+        atlas::make_column("manager_id", &Employee::manager_id, atlas::not_null()),
+        atlas::make_column("name",       &Employee::name,       atlas::not_null())
+    );
+    return atlas::make_storage(employee_table);
 }
 
 ut::suite<"query/select"> select_suite = [] {
@@ -305,5 +332,33 @@ ut::suite<"query/select"> select_suite = [] {
         std::string sql = q.to_sql(db);
         expect(sql == "SELECT p.title, u.id, u.name, u.email, u.age FROM users u INNER JOIN posts p ON p.user_id = u.id");
         expect(sql.find(", ,") == std::string::npos);
+    };
+
+    "all<table_instance>() expands columns with the instance alias"_test = [] {
+        auto db = make_employee_db();
+        auto q = atlas::select(atlas::all<employee_instance>(), atlas::all<manager_instance>())
+            .from<employee_instance>()
+            .inner_join<manager_instance>(
+                atlas::eq(
+                    atlas::col<employee_instance>(&Employee::manager_id),
+                    atlas::col<manager_instance>(&Employee::id)
+                )
+        );
+
+        auto sql = q.to_sql(db);
+        expect(sql == "SELECT e.id, e.manager_id, e.name, m.id, m.manager_id, m.name "
+                      "FROM employees e INNER JOIN employees m ON e.manager_id = m.id");
+    };
+
+    "select_all<table_instance>() pre-stamps the tagged FROM instance"_test = [] {
+        auto db = make_employee_db();
+        auto q = atlas::select_all<manager_instance>()
+            .where(atlas::eq(atlas::col<manager_instance>(&Employee::name), std::string{"Ada"}))
+            .order_by(atlas::col<manager_instance>(&Employee::id), false);
+
+        auto sql = q.to_sql(db);
+        auto params = q.params(db);
+        expect(sql == "SELECT m.id, m.manager_id, m.name FROM employees m WHERE m.name = $1 ORDER BY m.id DESC");
+        expect(params == std::vector<std::string>{"Ada"});
     };
 };

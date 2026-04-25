@@ -21,6 +21,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "atlas/query/source.hpp"
+
 namespace atlas {
 
 // ---------------------------------------------------------------------------
@@ -37,6 +39,11 @@ namespace atlas {
 //       column_ref c{&Entity::member};
 template <typename Entity, typename T, typename Tag = void>
 struct column_ref {
+    using entity_type = Entity;
+    using value_type = T;
+    using tag_type = Tag;
+    using source_type = detail::source_from_parts_t<Entity, Tag>;
+
     T Entity::*ptr;
 };
 
@@ -235,8 +242,23 @@ constexpr auto col(T Entity::*ptr) -> column_ref<Entity, T> {
 // through the AST. Serialisation uses Tag::alias if defined, otherwise
 // falls back to the default first-letter-of-table-name scheme.
 template <typename Tag, typename Entity, typename T>
+    requires(!detail::is_table_instance_v<Tag>)
 constexpr auto col(T Entity::*ptr) -> column_ref<Entity, T, Tag> {
     return column_ref<Entity, T, Tag>{ptr};
+}
+
+// ---------------------------------------------------------------------------
+// Factory: col<table_instance<Entity, Tag>>()
+// ---------------------------------------------------------------------------
+// Usage:
+//   using manager = table_instance<Employee, mgr>;
+//   col<manager>(&Employee::id)  // -> column_ref<Employee, int, mgr>
+template <typename Source, typename Entity, typename T>
+    requires detail::is_table_instance_v<Source>
+constexpr auto col(T Entity::*ptr) -> column_ref<Entity, T, detail::source_tag_t<Source>> {
+    static_assert(std::is_same_v<detail::source_entity_t<Source>, Entity>,
+        "col<table_instance<Entity, Tag>>() must receive a member pointer from Entity");
+    return column_ref<Entity, T, detail::source_tag_t<Source>>{ptr};
 }
 
 // ---------------------------------------------------------------------------

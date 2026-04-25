@@ -25,6 +25,12 @@ struct User {
     int32_t     age{};
 };
 
+struct user_alias {
+    static constexpr std::string_view alias = "u2";
+};
+
+using tagged_user = atlas::table_instance<User, user_alias>;
+
 ut::suite<"query/expr"> expr_suite = [] {
     using namespace ut;
 
@@ -57,6 +63,16 @@ ut::suite<"query/expr"> expr_suite = [] {
         auto c2 = atlas::col(&User::age);
 
         expect(c1.ptr != c2.ptr);
+    };
+
+    "col<table_instance>() preserves the table instance tag"_test = [] {
+        auto c = atlas::col<tagged_user>(&User::id);
+
+        static_assert(
+            std::is_same_v<decltype(c), atlas::column_ref<User, int32_t, user_alias>>,
+            "col<table_instance<Entity, Tag>>() must return column_ref<Entity, T, Tag>");
+
+        expect(c.ptr == &User::id);
     };
 
     // -----------------------------------------------------------------------
