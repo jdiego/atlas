@@ -73,8 +73,9 @@ struct storage_t {
 // ---------------------------------------------------------------------------
 
 template<typename... Tables>
-constexpr auto make_storage(Tables&&... ts) -> storage_t<std::remove_cvref_t<Tables>...> {
-    static_assert((is_table<Tables> && ...),"all arguments must satisfy is_table");
+constexpr auto make_storage(Tables&&... ts) -> storage_t<std::remove_cvref_t<Tables>...>
+{
+    static_assert((is_table<Tables> && ...), "all arguments must satisfy is_table");
     return { std::tuple<std::remove_cvref_t<Tables>...>(std::forward<Tables>(ts)...) };
 }
 

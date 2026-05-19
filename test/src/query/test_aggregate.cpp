@@ -1,5 +1,3 @@
-// Tests for atlas/query/aggregate.hpp
-//
 // Verifies aggregate node types, factories, is_aggregate concept, and
 // integration with atlas::select().
 

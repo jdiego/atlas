@@ -53,6 +53,16 @@ struct error {
     std::string sqlstate {};
     errc code {errc::unknown};
 
+    error() = default;
+
+    error(std::string msg, errc erro_code): message(std::move(msg)), code(erro_code) 
+    {}
+
+    error(std::string msg, std::string state, errc erro_code)
+    : message(std::move(msg)), sqlstate(std::move(state)), code(erro_code)
+    {}
+
+
     [[nodiscard]] auto is_retryable() const noexcept -> bool {
         return code == errc::connection_failure ||
                code == errc::serialization_failure ||

@@ -29,11 +29,7 @@ struct prepared_params {
 }
 
 [[nodiscard]] auto make_error(std::string message, errc code = errc::unknown, std::string sqlstate = {}) -> error {
-    return error{
-        .message = trim_message(std::move(message)),
-        .sqlstate = std::move(sqlstate),
-        .code = code,
-    };
+    return error{trim_message(std::move(message)), std::move(sqlstate), code};
 }
 
 [[nodiscard]] auto make_handle_error(std::string_view label) -> error {

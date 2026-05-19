@@ -243,6 +243,12 @@ else()
             ${CMAKE_CURRENT_BINARY_DIR}/${VERSION_HEADER_LOCATION}
     )
 
+    target_include_directories(
+        ${PROJECT_NAME_LOWERCASE}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
     target_compile_options(
         ${PROJECT_NAME_LOWERCASE}
         PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->"

@@ -21,11 +21,7 @@ struct result::impl {
 namespace {
 
 [[nodiscard]] auto make_error(std::string message, errc code = errc::unknown) -> error {
-    return error {
-        .message = std::move(message),
-        .sqlstate = {},
-        .code = code,
-    };
+    return error{std::move(message), code};
 }
 
 [[nodiscard]] auto make_empty_result_error() -> error {
