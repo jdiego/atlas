@@ -6,6 +6,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <expected>
 #include <variant>
+#include <utility>
 
 namespace atlas {
 
@@ -81,7 +83,7 @@ with_timeout(Duration duration,
     timer.expires_after(duration);
 
     auto wait_op = [&]() -> asio::awaitable<void> {
-        auto ec = co_await timer.async_wait(asio::use_awaitable);
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
         (void)ec;
     };
 
@@ -144,7 +146,7 @@ with_timeout(Duration duration,
     slot.assign([&timer](asio::cancellation_type) { timer.cancel(); });
 
     auto wait_op = [&]() -> asio::awaitable<void> {
-        auto ec = co_await timer.async_wait(asio::use_awaitable);
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
         (void)ec;
     };
 

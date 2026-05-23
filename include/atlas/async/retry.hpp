@@ -7,11 +7,11 @@
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <expected>
-
 namespace atlas {
 
 namespace asio = boost::asio;
@@ -22,25 +22,21 @@ class pool_connection;
 
 // Concept: Operation must be callable with pool_connection& and return the
 // correct awaitable type.
-template<typename Op, typename T>
-concept retryable_operation =
-    requires(Op op, pool_connection& conn) {
-        { op(conn) } -> std::same_as<asio::awaitable<std::expected<T, pg::error>>>;
-    };
+template <typename Op, typename T>
+concept retryable_operation = requires(Op op, pool_connection &conn) {
+    { op(conn) } -> std::same_as<asio::awaitable<std::expected<T, pg::error>>>;
+};
 
 // Retries op on transient PostgreSQL errors (serialization_failure, deadlock_detected).
 // Acquires a fresh connection from db on each attempt.
 // Uses exponential backoff: base_delay * 2^attempt, capped at max_delay.
 // Non-retryable errors are propagated immediately without further attempts.
-template<typename T, typename Operation>
+template <typename T, typename Operation>
     requires retryable_operation<Operation, T>
 [[nodiscard]] asio::awaitable<std::expected<T, pg::error>>
-with_retry(pool&                      db,
-           std::size_t               max_attempts,
-           Operation&&               op,
+with_retry(pool &db, std::size_t max_attempts, Operation &&op,
            std::chrono::milliseconds base_delay = std::chrono::milliseconds{10},
-           std::chrono::milliseconds max_delay  = std::chrono::milliseconds{500})
-{
+           std::chrono::milliseconds max_delay = std::chrono::milliseconds{500}) {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -100,8 +96,7 @@ with_retry(pool&                      db,
      *   Do not call release() manually.
      */
     auto ex = co_await asio::this_coro::executor;
-    std::expected<T, pg::error> last_result =
-        std::unexpected(pg::error{pg::errc::unknown, "no attempts made"});
+    std::expected<T, pg::error> last_result = std::unexpected(pg::error{pg::errc::unknown, "no attempts made"});
 
     for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
         auto conn_res = co_await db.acquire();

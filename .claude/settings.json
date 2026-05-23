@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.cpp|*.hpp|*.h|*.cc|*.cxx|*.c) clang-format --style=file -i \"$f\";; esac; } 2>/dev/null || true",
+            "statusMessage": "Formatting with clang-format..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in */build/*) printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Editing files inside /build/ is not allowed — these are generated artifacts.\"}}\\n';; esac; }"
+          }
+        ]
+      }
+    ]
+  }
+}
