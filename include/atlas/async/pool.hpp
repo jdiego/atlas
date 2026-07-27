@@ -8,6 +8,7 @@
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 
+#include <chrono>
 #include <expected>
 #include <memory>
 #include <optional>
@@ -53,6 +54,10 @@ public:
     [[nodiscard]] pg_awaitable<void> request_cancel();
 
     void invalidate() noexcept;
+
+    // The pool's pool_config::cleanup_budget, so with_timeout bounds its
+    // cleanup by the value configured once rather than one passed per call.
+    [[nodiscard]] std::chrono::milliseconds cleanup_budget() const noexcept;
 
     [[nodiscard]] bool is_alive() const noexcept;
     [[nodiscard]] bool transaction_aborted() const noexcept;

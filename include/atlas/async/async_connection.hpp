@@ -8,6 +8,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 
+#include <chrono>
 #include <expected>
 #include <optional>
 #include <span>
@@ -36,7 +37,11 @@ class async_connection {
 public:
     // Non-blocking factory. Calls PQconnectStart then polls via
     // sd_.async_wait(wait_write/wait_read) + PQconnectPoll until done.
-    [[nodiscard]] static pg_awaitable<async_connection> connect(executor_type executor, std::string_view connstr);
+    // `cleanup_budget` bounds the post-timeout cancel-and-drain sequence; a
+    // pool passes its own pool_config value down here.
+    [[nodiscard]] static pg_awaitable<async_connection>
+    connect(executor_type executor, std::string_view connstr,
+            std::chrono::milliseconds cleanup_budget = default_cleanup_budget);
 
     async_connection(const async_connection &) = delete;
     async_connection &operator=(const async_connection &) = delete;
@@ -73,12 +78,17 @@ public:
     // connections when their lease is returned.
     void invalidate() noexcept;
 
+    // How long with_timeout may spend cancelling and draining this connection
+    // before giving up on it. Fixed when the connection is opened.
+    [[nodiscard]] std::chrono::milliseconds cleanup_budget() const noexcept;
+
 private:
-    explicit async_connection(PGconn *raw, executor_type executor);
+    explicit async_connection(PGconn *raw, executor_type executor, std::chrono::milliseconds cleanup_budget);
 
     PGconn *pg_conn_ = nullptr;
     asio::posix::stream_descriptor conn_fd_;
     executor_type executor_;
+    std::chrono::milliseconds cleanup_budget_ = default_cleanup_budget;
 
     // Takes ownership of raw and maps its status to expected<result, error>.
     // Handles all ExecStatusType values; always calls PQclear on error paths.

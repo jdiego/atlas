@@ -203,7 +203,7 @@ asio::awaitable<void> pool_state::revive(async_connection *slot) {
             co_return;
         }
 
-        auto fresh = co_await async_connection::connect(ex, connstr);
+        auto fresh = co_await async_connection::connect(ex, connstr, cfg.cleanup_budget);
         if (fresh) {
             *slot = std::move(*fresh);
             hand_off(slot);
@@ -240,7 +240,7 @@ asio::awaitable<void> pool_state::initialise() {
             co_return;
         }
 
-        auto res = co_await async_connection::connect(ex, connstr);
+        auto res = co_await async_connection::connect(ex, connstr, cfg.cleanup_budget);
         if (!res) {
             continue;
         }
@@ -328,6 +328,12 @@ void pool_connection::invalidate() noexcept {
     if (conn_ != nullptr) {
         conn_->invalidate();
     }
+}
+
+std::chrono::milliseconds pool_connection::cleanup_budget() const noexcept {
+    // A moved-from lease has no connection to clean up; the library default is
+    // as good an answer as any and keeps the accessor total.
+    return conn_ != nullptr ? conn_->cleanup_budget() : default_cleanup_budget;
 }
 
 bool pool_connection::is_alive() const noexcept {

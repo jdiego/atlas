@@ -14,9 +14,8 @@ namespace atlas {
 
 namespace {
 
-// Status values guarded by feature macros are the ones libpq only gained in
-// later releases: PGRES_PIPELINE_* in 14 and PGRES_TUPLES_CHUNK in 17. Ubuntu
-// 24.04 still ships libpq 16, so naming them unconditionally breaks that build.
+// The build requires libpq >= 18 (see the pkg_check_modules call in
+// CMakeLists.txt), so every status below is unconditionally available.
 [[nodiscard]] auto is_success_status(ExecStatusType status) noexcept -> bool {
     switch (status) {
     case PGRES_EMPTY_QUERY:
@@ -26,13 +25,9 @@ namespace {
     case PGRES_COPY_IN:
     case PGRES_COPY_BOTH:
     case PGRES_SINGLE_TUPLE:
-#ifdef LIBPQ_HAS_PIPELINING
     case PGRES_PIPELINE_SYNC:
     case PGRES_PIPELINE_ABORTED:
-#endif
-#ifdef LIBPQ_HAS_CHUNK_MODE
     case PGRES_TUPLES_CHUNK:
-#endif
         return true;
     default:
         return false;
@@ -119,15 +114,15 @@ using cancel_connection_handle = std::unique_ptr<PGcancelConn, cancel_connection
 
 // ── Private constructor ────────────────────────────────────────────────────
 
-async_connection::async_connection(PGconn *raw, executor_type ex)
-    : pg_conn_{raw}, conn_fd_{ex, PQsocket(raw)}, executor_{std::move(ex)} {
+async_connection::async_connection(PGconn *raw, executor_type ex, std::chrono::milliseconds cleanup_budget)
+    : pg_conn_{raw}, conn_fd_{ex, PQsocket(raw)}, executor_{std::move(ex)}, cleanup_budget_{cleanup_budget} {
 }
 
 // ── Move operations ────────────────────────────────────────────────────────
 
 async_connection::async_connection(async_connection &&other) noexcept
     : pg_conn_{std::exchange(other.pg_conn_, nullptr)}, conn_fd_{std::move(other.conn_fd_)},
-      executor_{std::move(other.executor_)} {
+      executor_{std::move(other.executor_)}, cleanup_budget_{other.cleanup_budget_} {
 }
 
 async_connection &async_connection::operator=(async_connection &&other) noexcept {
@@ -155,6 +150,7 @@ async_connection &async_connection::operator=(async_connection &&other) noexcept
     this->pg_conn_ = std::exchange(other.pg_conn_, nullptr);
     this->conn_fd_ = std::move(other.conn_fd_);
     this->executor_ = std::move(other.executor_);
+    this->cleanup_budget_ = other.cleanup_budget_;
     return *this;
 }
 
@@ -193,7 +189,8 @@ void async_connection::cleanup() noexcept {
 // Non-blockingly establishes a connection: PQconnectStart followed by
 // PQconnectPoll driven off the socket until it reports OK or FAILED.
 // On every exit path libpq owns the socket and the descriptor has let go of it.
-pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::string_view connstr) {
+pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::string_view connstr,
+                                                         std::chrono::milliseconds cleanup_budget) {
     // string_view carries no NUL-terminator guarantee; libpq needs a C string.
     const std::string connstr_str{connstr};
 
@@ -234,7 +231,7 @@ pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::
         co_return std::unexpected(polled.error());
     }
 
-    co_return async_connection{connection, ex};
+    co_return async_connection{connection, ex, cleanup_budget};
 }
 
 // ── Non-blocking query send ────────────────────────────────────────────────
@@ -456,6 +453,10 @@ pg_awaitable<void> async_connection::request_cancel() {
 
 void async_connection::invalidate() noexcept {
     cleanup();
+}
+
+std::chrono::milliseconds async_connection::cleanup_budget() const noexcept {
+    return cleanup_budget_;
 }
 
 // ── Internal result wrapping ───────────────────────────────────────────────

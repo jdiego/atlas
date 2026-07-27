@@ -133,16 +133,11 @@ struct prepared_params {
     case PGRES_COPY_IN:
     case PGRES_COPY_BOTH:
     case PGRES_SINGLE_TUPLE:
-        // Guarded by the feature macros libpq exposes for them: PGRES_PIPELINE_*
-        // arrived in 14 and PGRES_TUPLES_CHUNK in 17, and Ubuntu 24.04 still ships
-        // libpq 16.
-#ifdef LIBPQ_HAS_PIPELINING
+    // The build requires libpq >= 18, so the pipeline and chunk statuses are
+    // always available.
     case PGRES_PIPELINE_SYNC:
     case PGRES_PIPELINE_ABORTED:
-#endif
-#ifdef LIBPQ_HAS_CHUNK_MODE
     case PGRES_TUPLES_CHUNK:
-#endif
         return true;
     default:
         return false;

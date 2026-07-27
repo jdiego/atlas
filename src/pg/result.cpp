@@ -68,19 +68,14 @@ namespace {
         return result_status::copy_both;
     case PGRES_SINGLE_TUPLE:
         return result_status::single_tuple;
-        // Guarded by the feature macros libpq exposes for them: PGRES_PIPELINE_*
-        // arrived in 14 and PGRES_TUPLES_CHUNK in 17, and Ubuntu 24.04 still ships
-        // libpq 16.
-#ifdef LIBPQ_HAS_PIPELINING
+    // The build requires libpq >= 18, so the pipeline and chunk statuses are
+    // always available.
     case PGRES_PIPELINE_SYNC:
         return result_status::pipeline_sync;
     case PGRES_PIPELINE_ABORTED:
         return result_status::pipeline_aborted;
-#endif
-#ifdef LIBPQ_HAS_CHUNK_MODE
     case PGRES_TUPLES_CHUNK:
         return result_status::tuples_chunk;
-#endif
     default:
         return result_status::unknown;
     }

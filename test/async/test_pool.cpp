@@ -126,6 +126,28 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         expect(ran);
     };
 
+    // pool_config is the single place the cleanup budget is set; with_timeout
+    // reads it off the lease rather than having every call site pass it.
+    "the configured cleanup budget reaches the lease"_test = [&url] {
+        asio::io_context ctx;
+        auto cfg = config_for(*url, 1, 5s);
+        cfg.cleanup_budget = 750ms;
+        atlas::pool db{ctx.get_executor(), cfg};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto lease = co_await db.acquire();
+            expect(lease.has_value()) << (lease ? "" : lease.error().message);
+            if (!lease) {
+                co_return false;
+            }
+
+            expect(lease->cleanup_budget() == 750ms);
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
     "an exhausted cleanup budget invalidates and revives the pooled connection"_test = [&url] {
         asio::io_context ctx;
         auto cfg = config_for(*url, 1, 5s);
@@ -223,7 +245,9 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
     // permanently costing the pool a slot.
     "a connection killed server-side is replaced, not recirculated"_test = [&url] {
         asio::io_context ctx;
-        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+        auto cfg = config_for(*url, 1, 5s);
+        cfg.cleanup_budget = 250ms; // must survive the reconnect below
+        atlas::pool db{ctx.get_executor(), cfg};
 
         const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
             {
@@ -246,6 +270,12 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
 
             auto reused = co_await db.execute("SELECT 1", no_params);
             expect(reused.has_value()) << "the pool never recovered a usable connection";
+
+            auto replacement = co_await db.acquire();
+            expect(replacement.has_value());
+            if (replacement) {
+                expect(replacement->cleanup_budget() == 250ms) << "the replacement lost the configured budget";
+            }
             co_return true;
         }());
 
