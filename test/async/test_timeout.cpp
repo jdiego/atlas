@@ -171,6 +171,26 @@ ut::suite<"async/timeout"> timeout_suite = [] {
         expect(!conn.invalidated);
     };
 
+    "a zero cleanup budget invalidates even when cancellation completes immediately"_test = [] {
+        minimal_connection conn;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7), 0ms));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.invalidated) << "a zero cleanup budget must not allow connection reuse";
+    };
+
+    "a negative cleanup budget invalidates even when cancellation completes immediately"_test = [] {
+        minimal_connection conn;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7), -1ms));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.invalidated) << "a negative cleanup budget must not allow connection reuse";
+    };
+
     "completing in time leaves the connection untouched"_test = [] {
         recording_connection conn;
 

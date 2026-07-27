@@ -91,6 +91,10 @@ template <cancellable_connection Connection>
 // with_timeout exists to enforce, by an unbounded margin.
 template <cancellable_connection Connection>
 [[nodiscard]] asio::awaitable<bool> reclaim_connection(Connection &conn, std::chrono::milliseconds budget) {
+    if (budget <= std::chrono::milliseconds::zero()) {
+        co_return false;
+    }
+
     auto ex = co_await asio::this_coro::executor;
     asio::steady_timer deadline{ex};
     deadline.expires_after(budget);
