@@ -55,7 +55,7 @@ struct error {
 
     error() = default;
 
-    error(std::string msg, errc erro_code): message(std::move(msg)), code(erro_code) 
+    error(std::string msg, errc erro_code): message(std::move(msg)), code(erro_code)
     {}
 
     error(std::string msg, std::string state, errc erro_code)
