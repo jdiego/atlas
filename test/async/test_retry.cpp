@@ -46,6 +46,18 @@ using int_result = std::expected<int, atlas::pg::error>;
     return std::unexpected(atlas::pg::error{std::move(message), code});
 }
 
+auto sample_pool_during_backoff(atlas::pool &db, const int &calls, std::size_t &available_during_backoff)
+    -> asio::awaitable<void> {
+    for (int sample_attempt = 0; calls < 1 && sample_attempt < 10; ++sample_attempt) {
+        co_await atlas_test::sleep_for(5ms);
+    }
+    if (calls < 1) {
+        co_return;
+    }
+    co_await atlas_test::sleep_for(50ms); // well inside the 300ms backoff
+    available_during_backoff = db.available();
+}
+
 } // namespace
 
 ut::suite<"async/retry/unit"> retry_unit_suite = [] {
@@ -193,14 +205,8 @@ ut::suite<"async/retry/integration"> retry_integration_suite = [] {
 
         const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
             // Samples the pool while with_retry is waiting out its backoff.
-            auto sampler = [&]() -> asio::awaitable<void> {
-                while (calls < 1) {
-                    co_await atlas_test::sleep_for(5ms);
-                }
-                co_await atlas_test::sleep_for(50ms); // well inside the 300ms backoff
-                available_during_backoff = db.available();
-            };
-            asio::co_spawn(co_await asio::this_coro::executor, sampler(), asio::detached);
+            asio::co_spawn(co_await asio::this_coro::executor,
+                           sample_pool_during_backoff(db, calls, available_during_backoff), asio::detached);
 
             auto res = co_await atlas::with_retry<int>(db, 2, op, 300ms, 300ms);
             expect(!res.has_value());
