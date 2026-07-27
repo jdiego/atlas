@@ -37,7 +37,8 @@ endif()
 # ######################################################################################################################
 # Adding unit test files
 # ######################################################################################################################
-file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
+     ${CMAKE_CURRENT_SOURCE_DIR}/async/*.cpp)
 verbose_message("Adding ${TEST_SOURCES} to ${TEST_SUITE} test suite.")
 
 # ######################################################################################################################

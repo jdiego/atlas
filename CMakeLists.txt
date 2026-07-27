@@ -153,7 +153,7 @@ if(NOT ATLAS_HAS_BOOST_ASIO_HPP)
 endif()
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
+pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET "libpq>=18")
 
 if(TARGET PkgConfig::LIBPQ AND NOT TARGET PostgreSQL::PostgreSQL)
     add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::LIBPQ)

@@ -16,7 +16,7 @@
 // Forward-declare the libpq opaque types to avoid pulling in libpq-fe.h in
 // every translation unit that includes this header.
 struct pg_conn;
-using PGconn   = pg_conn;
+using PGconn = pg_conn;
 struct pg_result;
 using PGresult = pg_result;
 
@@ -38,45 +38,56 @@ public:
     // sd_.async_wait(wait_write/wait_read) + PQconnectPoll until done.
     [[nodiscard]] static pg_awaitable<async_connection> connect(executor_type executor, std::string_view connstr);
 
-    async_connection(const async_connection&)            = delete;
-    async_connection& operator=(const async_connection&) = delete;
-    async_connection(async_connection&&) noexcept;
-    async_connection& operator=(async_connection&&) noexcept;
+    async_connection(const async_connection &) = delete;
+    async_connection &operator=(const async_connection &) = delete;
+    async_connection(async_connection &&) noexcept;
+    async_connection &operator=(async_connection &&) noexcept;
 
     // Releases the stream_descriptor fd before calling PQfinish.
     ~async_connection();
 
     // Enqueues a parameterised query without blocking using PQsendQueryParams.
     // Returns immediately after enqueuing; call receive() for the result.
-    [[nodiscard]] pg_expected<void> send_query(std::string_view sql, std::span<const char* const> params);
+    [[nodiscard]] pg_expected<void> send_query(std::string_view sql, std::span<const char *const> params);
 
     // Waits for the next result.
-    // Loop: async_wait(wait_read) → PQconsumeInput → PQisBusy → PQgetResult.
-    // Returns nullopt when PQgetResult returns nullptr (end of result stream).
+    // Loop: PQisBusy → PQgetResult, waiting on the socket only when libpq has
+    // nothing buffered. Returns nullopt at end of the result stream; callers
+    // must keep calling until then or the connection cannot be reused.
     [[nodiscard]] pg_awaitable<std::optional<pg::result>> receive();
 
     // Convenience: send_query + loop receive() until nullopt.
     // Returns the last non-null result or an error.
-    [[nodiscard]] pg_awaitable<pg::result> execute(std::string_view sql, std::span<const char* const> params);
+    [[nodiscard]] pg_awaitable<pg::result> execute(std::string_view sql, std::span<const char *const> params);
 
-    [[nodiscard]] bool is_alive()    const noexcept;
-    [[nodiscard]] int  socket_fd()   const noexcept;
-    [[nodiscard]] int  backend_pid() const noexcept;
+    [[nodiscard]] bool is_alive() const noexcept;
+    [[nodiscard]] bool transaction_aborted() const noexcept;
+    [[nodiscard]] int socket_fd() const noexcept;
+    [[nodiscard]] int backend_pid() const noexcept;
 
-    // Initiates server-side query cancellation via PQgetCancel + PQcancel.
-    // Must be called before sd_.cancel() when aborting an in-flight query.
-    [[nodiscard]] pg_expected<void> request_cancel() noexcept;
+    // Initiates server-side query cancellation through libpq's non-blocking
+    // PGcancelConn state machine.
+    [[nodiscard]] pg_awaitable<void> request_cancel();
+
+    // Makes the connection reject further work. A pool replaces invalidated
+    // connections when their lease is returned.
+    void invalidate() noexcept;
 
 private:
-    explicit async_connection(PGconn* raw, executor_type executor);
+    explicit async_connection(PGconn *raw, executor_type executor);
 
-    PGconn*                          pg_conn_ = nullptr;
-    asio::posix::stream_descriptor   conn_fd_;
-    executor_type                    executor_;
+    PGconn *pg_conn_ = nullptr;
+    asio::posix::stream_descriptor conn_fd_;
+    executor_type executor_;
 
     // Takes ownership of raw and maps its status to expected<result, error>.
     // Handles all ExecStatusType values; always calls PQclear on error paths.
-    [[nodiscard]] pg_expected<pg::result> wrap_result(PGresult* raw);
+    [[nodiscard]] pg_expected<pg::result> wrap_result(PGresult *raw);
+
+    // Empties libpq's output buffer, waiting on writability as needed.
+    // receive() calls this first so a partially-sent query cannot deadlock.
+    [[nodiscard]] pg_awaitable<void> flush();
+
     void cleanup() noexcept;
 };
 

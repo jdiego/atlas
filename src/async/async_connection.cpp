@@ -2,9 +2,11 @@
 #include "atlas/pg/error.hpp"
 #include "atlas/pg/result.hpp"
 #include "pg/detail/result_handle_adopter.hpp"
+#include <boost/asio/as_tuple.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <libpq-fe.h>
 
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -12,8 +14,10 @@ namespace atlas {
 
 namespace {
 
-[[nodiscard]] auto is_success_status(ExecStatusType status) noexcept -> bool
-{
+// Status values guarded by feature macros are the ones libpq only gained in
+// later releases: PGRES_PIPELINE_* in 14 and PGRES_TUPLES_CHUNK in 17. Ubuntu
+// 24.04 still ships libpq 16, so naming them unconditionally breaks that build.
+[[nodiscard]] auto is_success_status(ExecStatusType status) noexcept -> bool {
     switch (status) {
     case PGRES_EMPTY_QUERY:
     case PGRES_COMMAND_OK:
@@ -22,12 +26,92 @@ namespace {
     case PGRES_COPY_IN:
     case PGRES_COPY_BOTH:
     case PGRES_SINGLE_TUPLE:
+#ifdef LIBPQ_HAS_PIPELINING
     case PGRES_PIPELINE_SYNC:
     case PGRES_PIPELINE_ABORTED:
+#endif
+#ifdef LIBPQ_HAS_CHUNK_MODE
     case PGRES_TUPLES_CHUNK:
+#endif
         return true;
     default:
         return false;
+    }
+}
+
+// Detaches the fd from the descriptor without closing it, so that libpq stays
+// the sole owner of the socket. release() has no non-throwing overload, and a
+// failure here is never actionable — the fd is closed by PQfinish either way.
+void detach_descriptor(asio::posix::stream_descriptor &fd) noexcept {
+    try {
+        if (fd.is_open()) {
+            static_cast<void>(fd.release());
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+}
+
+// Observes a socket owned by libpq. The descriptor must release, never close,
+// that socket on every exit path, including exception unwinding.
+struct descriptor_observer {
+    explicit descriptor_observer(executor_type ex) : fd{std::move(ex)} {
+    }
+
+    descriptor_observer(const descriptor_observer &) = delete;
+    descriptor_observer &operator=(const descriptor_observer &) = delete;
+
+    ~descriptor_observer() {
+        detach_descriptor(fd);
+    }
+
+    asio::posix::stream_descriptor fd;
+};
+
+struct cancel_connection_deleter {
+    void operator()(PGcancelConn *cancel) const noexcept {
+        if (cancel != nullptr) {
+            PQcancelFinish(cancel);
+        }
+    }
+};
+
+using cancel_connection_handle = std::unique_ptr<PGcancelConn, cancel_connection_deleter>;
+
+// Drives the PQconnectPoll handshake to completion, keeping `fd` in sync with
+// PQsocket(): libpq can swap the socket underneath us during SSL/GSS
+// negotiation. Reassigning unconditionally would fail with already_open.
+[[nodiscard]] pg_awaitable<void> poll_until_connected(PGconn *conn, asio::posix::stream_descriptor &fd) {
+    using descriptor = asio::posix::stream_descriptor;
+
+    for (;;) {
+        const PostgresPollingStatusType status = PQconnectPoll(conn);
+
+        if (status == PGRES_POLLING_OK) {
+            co_return pg_expected<void>{};
+        }
+        if (status == PGRES_POLLING_FAILED) {
+            co_return std::unexpected(pg::error{PQerrorMessage(conn), pg::errc::connection_failure});
+        }
+        if (status != PGRES_POLLING_READING && status != PGRES_POLLING_WRITING) {
+            continue; // PGRES_POLLING_ACTIVE is obsolete; poll again.
+        }
+
+        const int current_fd = PQsocket(conn);
+        if (current_fd < 0) {
+            co_return std::unexpected(
+                pg::error{"connection socket closed during handshake", pg::errc::connection_failure});
+        }
+        if (current_fd != fd.native_handle()) {
+            detach_descriptor(fd);
+            fd.assign(current_fd);
+        }
+
+        const auto wait_type = (status == PGRES_POLLING_READING) ? descriptor::wait_read : descriptor::wait_write;
+
+        auto [ec] = co_await fd.async_wait(wait_type, asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
+        }
     }
 }
 
@@ -35,22 +119,18 @@ namespace {
 
 // ── Private constructor ────────────────────────────────────────────────────
 
-async_connection::async_connection(PGconn* raw, executor_type ex)
-    : pg_conn_{raw}
-    , conn_fd_{ex, PQsocket(raw)}
-    , executor_{std::move(ex)}
-{}
+async_connection::async_connection(PGconn *raw, executor_type ex)
+    : pg_conn_{raw}, conn_fd_{ex, PQsocket(raw)}, executor_{std::move(ex)} {
+}
 
 // ── Move operations ────────────────────────────────────────────────────────
 
-async_connection::async_connection(async_connection&& other) noexcept
-    : pg_conn_{std::exchange(other.pg_conn_, nullptr)}
-    , conn_fd_{std::move(other.conn_fd_)}
-    , executor_{std::move(other.executor_)}
-{}
+async_connection::async_connection(async_connection &&other) noexcept
+    : pg_conn_{std::exchange(other.pg_conn_, nullptr)}, conn_fd_{std::move(other.conn_fd_)},
+      executor_{std::move(other.executor_)} {
+}
 
-async_connection& async_connection::operator=(async_connection&& other) noexcept
-{
+async_connection &async_connection::operator=(async_connection &&other) noexcept {
     /*
      * Move-assigns another async_connection, cleaning up the current one first.
      *
@@ -69,18 +149,18 @@ async_connection& async_connection::operator=(async_connection&& other) noexcept
      *     that conn_fd_ still holds. Closing while conn_fd_ owns it causes double-close (UB).
      *
      */
-    if (this == &other) return *this;
+    if (this == &other)
+        return *this;
     this->cleanup();
-    this->pg_conn_      = std::exchange(other.pg_conn_, nullptr);
-    this->conn_fd_      = std::move(other.conn_fd_);
-    this->executor_     = std::move(other.executor_);
+    this->pg_conn_ = std::exchange(other.pg_conn_, nullptr);
+    this->conn_fd_ = std::move(other.conn_fd_);
+    this->executor_ = std::move(other.executor_);
     return *this;
 }
 
 // ── Destructor ─────────────────────────────────────────────────────────────
 
-async_connection::~async_connection()
-{
+async_connection::~async_connection() {
     /*
      * Cleanly destroys the connection by releasing the Asio fd handle
      * before letting libpq close the socket.
@@ -97,276 +177,194 @@ async_connection::~async_connection()
      *
      */
     this->cleanup();
-
 }
 
-void async_connection::cleanup() noexcept
-{
-    if (this->pg_conn_ != nullptr) 
-    {
-        //boost::system::error_code ignored_ec;
-        //this->conn_fd_.release(ignored_ec);
-        this->conn_fd_.release();
+void async_connection::cleanup() noexcept {
+    if (this->pg_conn_ != nullptr) {
+        // Detach before PQfinish: both close the same fd, and letting the
+        // descriptor close it after libpq did would hit an unrelated fd.
+        detach_descriptor(this->conn_fd_);
         PQfinish(this->pg_conn_);
         this->pg_conn_ = nullptr;
     }
 }
 
 // ── Static factory ─────────────────────────────────────────────────────────
-pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::string_view connstr)
-{
-    /*
-     * Non-blockingly establishes a PostgreSQL connection by polling libpq
-     * until PQconnectPoll returns PGRES_POLLING_OK or PGRES_POLLING_FAILED.
-     *
-     * Key types involved:
-     *   - PostgresPollingStatusType: PQconnectPoll return type (libpq-fe.h)
-     *   - asio::posix::stream_descriptor: wraps the socket fd for Asio I/O
-     *   - PQsocket(conn): returns the current socket fd (may change during poll)
-     *
-     * Preconditions:
-     *   - ex is bound to a running io_context.
-     *   - connstr is a valid libpq connection string.
-     *
-     * Postconditions:
-     *   - On success: PQstatus(conn) == CONNECTION_OK.
-     *   - On failure: PGconn* is PQfinish'd; no resource leak.
-     *
-     * Pitfalls:
-     *   - PQsocket() CAN change between poll steps on some SSL negotiation paths.
-     *     Always re-read and re-assign sd after each async_wait.
-     *   - string_view is not null-terminated; always copy to std::string first.
-     *   - The sd constructed here is a temporary; the async_connection constructor
-     *     creates its own sd from the fd.
-     *
-     * Hint:
-     *   Use asio::posix::stream_descriptor::wait_read and wait_write type aliases.
-     */
-    std::string connstr_str(connstr);
-    auto connection = PQconnectStart(connstr_str.c_str());
-    if (!connection) {
-        co_return  std::unexpected(pg::error{"PQconnectStart returned null", pg::errc::connection_failure});
+// Non-blockingly establishes a connection: PQconnectStart followed by
+// PQconnectPoll driven off the socket until it reports OK or FAILED.
+// On every exit path libpq owns the socket and the descriptor has let go of it.
+pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::string_view connstr) {
+    // string_view carries no NUL-terminator guarantee; libpq needs a C string.
+    const std::string connstr_str{connstr};
+
+    PGconn *connection = PQconnectStart(connstr_str.c_str());
+    if (connection == nullptr) {
+        co_return std::unexpected(pg::error{"PQconnectStart returned null", pg::errc::connection_failure});
     }
     if (PQstatus(connection) == CONNECTION_BAD) {
         std::string msg = PQerrorMessage(connection);
         PQfinish(connection);
         co_return std::unexpected(pg::error{std::move(msg), pg::errc::connection_failure});
     }
-    asio::posix::stream_descriptor connection_fd{ex, PQsocket(connection)};
-    co_return co_await [&]() -> pg_awaitable<async_connection> {
-        while (true) {
-            PostgresPollingStatusType status = PQconnectPoll(connection);
-            switch (status) {
-                case PGRES_POLLING_READING:
-                    co_await connection_fd.async_wait(asio::posix::stream_descriptor::wait_read, asio::use_awaitable);
-                    break;
-                case PGRES_POLLING_WRITING:
-                    co_await connection_fd.async_wait(asio::posix::stream_descriptor::wait_write, asio::use_awaitable);
-                    break;
-                case PGRES_POLLING_OK:
-                    goto connected;
-                case PGRES_POLLING_FAILED:
-                default: {
-                    std::string msg = PQerrorMessage(connection);
-                    PQfinish(connection);
-                    co_return std::unexpected(pg::error{std::move(msg), pg::errc::connection_failure});
-                }
-            }
-            // Re-read socket; PQsocket may change after a poll step.
-            connection_fd.assign(PQsocket(connection));
-        }
-    connected:
-        // Release the temporary stream_descriptor before passing to the constructor.
-        connection_fd.release();
-        co_return async_connection{connection, ex};
-    }();
+
+    const int initial_fd = PQsocket(connection);
+    if (initial_fd < 0) {
+        std::string msg = PQerrorMessage(connection);
+        PQfinish(connection);
+        co_return std::unexpected(pg::error{std::move(msg), pg::errc::connection_failure});
+    }
+
+    asio::posix::stream_descriptor connection_fd{ex, initial_fd};
+
+    pg_expected<void> polled;
+    try {
+        polled = co_await poll_until_connected(connection, connection_fd);
+    } catch (...) {
+        // Cancellation unwinds through here; never let the descriptor close a
+        // socket that libpq is about to close itself.
+        detach_descriptor(connection_fd);
+        PQfinish(connection);
+        throw;
+    }
+
+    detach_descriptor(connection_fd);
+
+    if (!polled) {
+        PQfinish(connection);
+        co_return std::unexpected(polled.error());
+    }
+
+    co_return async_connection{connection, ex};
 }
 
 // ── Non-blocking query send ────────────────────────────────────────────────
 
-pg_expected<void> async_connection::send_query(std::string_view sql, std::span<const char* const> params)
-{
-    /*
-     * IMPLEMENTATION GUIDE:
-     *
-     * What this does:
-     *   Enqueues a parameterised SQL query on the non-blocking connection.
-     *
-     * Step 1 — If pg_conn_ == nullptr:
-     *             return std::unexpected(pg::error{pg::errc::invalid_state,
-     *                                             "send_query on moved-from connection"});
-     * Step 2 — int rc = PQsendQueryParams(
-     *                       pg_conn_,
-     *                       sql.data(),
-     *                       static_cast<int>(params.size()),
-     *                       nullptr,       // paramTypes: let server infer
-     *                       params.data(), // paramValues: null-terminated strings
-     *                       nullptr,       // paramLengths: text mode, not needed
-     *                       nullptr,       // paramFormats: text mode (0)
-     *                       0);            // resultFormat: text
-     * Step 3 — If rc == 0:
-     *             return std::unexpected(pg::error{pg::errc::unknown,
-     *                                             PQerrorMessage(pg_conn_)});
-     * Step 4 — return {} (success).
-     *
-     * Key types involved:
-     *   - PQsendQueryParams: libpq non-blocking parameterised query submission
-     *   - std::span<const char* const>: caller-owned array of parameter C-strings
-     *
-     * Preconditions:
-     *   - pg_conn_ != nullptr; PQstatus(pg_conn_) == CONNECTION_OK.
-     *   - No other query is currently in flight on this connection.
-     *
-     * Postconditions:
-     *   - On success: query is enqueued; call receive() to retrieve the result.
-     *   - On failure: connection state may be degraded; check is_alive().
-     *
-     * Pitfalls:
-     *   - sql.data() is used directly; it must be null-terminated.
-     *     If string_view does not guarantee null termination, copy to std::string.
-     *   - PQsendQueryParams does not flush; the io_context flushes asynchronously.
-     *
-     * Hint:
-     *   Pass 0 for resultFormat to request text-format results (not binary).
-     */
+// Enqueues a parameterised query. The query may still be sitting in libpq's
+// output buffer when this returns; receive() flushes before it waits for input.
+pg_expected<void> async_connection::send_query(std::string_view sql, std::span<const char *const> params) {
     if (pg_conn_ == nullptr) {
         return std::unexpected(pg::error{"send_query on moved-from connection", pg::errc::invalid_state});
     }
-    int rc = PQsendQueryParams(
-        pg_conn_,
-        sql.data(),
-        static_cast<int>(params.size()),
-        nullptr,       // paramTypes: let server infer
-        params.data(), // paramValues: null-terminated strings
-        nullptr,       // paramLengths: text mode, not needed
-        nullptr,       // paramFormats: text mode (0)
-        0);            // resultFormat: text
+
+    // string_view carries no NUL-terminator guarantee; passing sql.data()
+    // straight to libpq would read past the end of the view.
+    const std::string sql_str{sql};
+
+    const int rc = PQsendQueryParams(pg_conn_, sql_str.c_str(), static_cast<int>(params.size()),
+                                     nullptr,       // paramTypes: let server infer
+                                     params.data(), // paramValues: null-terminated strings
+                                     nullptr,       // paramLengths: text mode, not needed
+                                     nullptr,       // paramFormats: text mode (0)
+                                     0);            // resultFormat: text
 
     if (rc == 0) {
         return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::unknown});
-
     }
     return {}; // success
 }
 
+// ── Output flush ───────────────────────────────────────────────────────────
+
+// Drives libpq's output buffer empty. On a non-blocking connection
+// PQsendQueryParams can return before the whole query reaches the socket; a
+// query left half-sent would never produce a reply to wait for.
+pg_awaitable<void> async_connection::flush() {
+    for (;;) {
+        const int rc = PQflush(pg_conn_);
+        if (rc == 0) {
+            co_return pg_expected<void>{};
+        }
+        if (rc < 0) {
+            co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
+        }
+
+        auto [ec] = co_await conn_fd_.async_wait(asio::posix::stream_descriptor::wait_write,
+                                                 asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
+        }
+    }
+}
+
 // ── Result receive loop ────────────────────────────────────────────────────
 
-pg_awaitable<std::optional<pg::result>> async_connection::receive()
-{
-    /*
-     * IMPLEMENTATION GUIDE:
-     *
-     * What this does:
-     *   Waits for one result from the server; returns nullopt at end of stream.
-     *
-     * Step 1 — Outer loop (until a complete result or end-of-stream):
-     *   a. co_await conn_fd_.async_wait(
-     *          asio::posix::stream_descriptor::wait_read,
-     *          asio::use_awaitable);
-     *   b. if (PQconsumeInput(pg_conn_) == 0):
-     *          co_return std::unexpected(pg::error{pg::errc::unknown,
-     *                                             PQerrorMessage(pg_conn_)});
-     *   c. while (!PQisBusy(pg_conn_)) {
-     *          PGresult* raw = PQgetResult(pg_conn_);
-     *          if (raw == nullptr) co_return std::nullopt;  // end of results
-     *          co_return wrap_result(raw);
-     *      }
-     *      // PQisBusy == true: loop back to async_wait for more data.
-     *
-     * Key types involved:
-     *   - PQconsumeInput: reads available data into libpq's internal buffer
-     *   - PQisBusy: returns 1 if a complete result is not yet buffered
-     *   - PQgetResult: dequeues the next result; returns nullptr at end of stream
-     *
-     * Preconditions:
-     *   - send_query() returned success.
-     *   - No concurrent receive() calls on this connection.
-     *
-     * Postconditions:
-     *   - Returns one result or nullopt. Caller must loop until nullopt to fully
-     *     drain the result stream.
-     *
-     * Pitfalls:
-     *   - Must drain all results (including error results) until PQgetResult returns
-     *     nullptr; otherwise the connection enters an undefined state for next queries.
-     *   - Do NOT busy-spin; always co_await async_wait before PQconsumeInput.
-     *
-     * Hint:
-     *   Outer loop structure:
-     *     while (true) {
-     *       co_await conn_fd_.async_wait(wait_read, use_awaitable);
-     *       PQconsumeInput(pg_conn_);
-     *       while (!PQisBusy(pg_conn_)) { auto* r = PQgetResult(pg_conn_); ... }
-     *     }
-     */
-    while (true) {
-        co_await conn_fd_.async_wait(asio::posix::stream_descriptor::wait_read, asio::use_awaitable);
+// Returns the next result, or nullopt once the stream is exhausted. Callers
+// must keep calling until nullopt: leaving the terminating sentinel unread
+// leaves the connection unusable for the next query.
+pg_awaitable<std::optional<pg::result>> async_connection::receive() {
+    if (pg_conn_ == nullptr) {
+        co_return std::unexpected(pg::error{"receive on moved-from connection", pg::errc::invalid_state});
+    }
+
+    if (auto flushed = co_await flush(); !flushed) {
+        co_return std::unexpected(flushed.error());
+    }
+
+    for (;;) {
+        // Consume what libpq has already buffered before touching the socket.
+        // A result and its terminating sentinel usually arrive in the same read,
+        // so waiting for readability first would block until the *next* query
+        // produced traffic — that is, forever.
+        if (PQisBusy(pg_conn_) == 0) {
+            PGresult *raw = PQgetResult(pg_conn_);
+            if (raw == nullptr) {
+                co_return std::optional<pg::result>{}; // end of results
+            }
+
+            auto wrapped = wrap_result(raw);
+            if (!wrapped) {
+                co_return std::unexpected(wrapped.error());
+            }
+            co_return std::optional<pg::result>{std::move(*wrapped)};
+        }
+
+        auto [ec] = co_await conn_fd_.async_wait(asio::posix::stream_descriptor::wait_read,
+                                                 asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
+        }
         if (PQconsumeInput(pg_conn_) == 0) {
-            co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::unknown});
-        }
-        while (!PQisBusy(pg_conn_)) {
-        auto* raw = PQgetResult(pg_conn_);
-        if (raw == nullptr) {
-            co_return std::nullopt; // end of results   
-        }
-        co_return wrap_result(raw);
+            co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
     }
 }
 
 // ── Convenience execute ────────────────────────────────────────────────────
 
-pg_awaitable<pg::result> async_connection::execute(std::string_view sql, std::span<const char* const> params)
-{
-    /*
-     * IMPLEMENTATION GUIDE:
-     *
-     * What this does:
-     *   Sends a query and collects all results, returning the last non-null one.
-     *
-     * Step 1 — auto sq = send_query(sql, params);
-     *           if (!sq) co_return std::unexpected(sq.error());
-     * Step 2 — std::optional<pg::result> last;
-     * Step 3 — Loop:
-     *             auto res = co_await receive();
-     *             if (!res) co_return std::unexpected(res.error());
-     *             if (!res->has_value()) break;          // nullopt = end of stream
-     *             last = std::move(**res);
-     * Step 4 — If !last:
-     *             co_return std::unexpected(pg::error{pg::errc::unknown,
-     *                                                 "no result returned"});
-     * Step 5 — co_return std::move(*last).
-     *
-     * Preconditions:
-     *   - pg_conn_ != nullptr; in a ready state.
-     *
-     * Postconditions:
-     *   - Result stream fully consumed (receive() returned nullopt).
-     *   - Returns the last non-null result (typically the only one for a single
-     *     statement query).
-     *
-     * Pitfalls:
-     *   - Multi-statement queries produce multiple non-null results; only the last
-     *     is returned. Use send_query + manual receive() loop for multi-result queries.
-     *
-     * Hint:
-     *   A single-statement PostgreSQL query always produces exactly two PQgetResult
-     *   calls: one real PGresult and one nullptr sentinel.
-     */
+// Sends a query and consumes the whole result stream, returning the last
+// non-null result. Multi-statement queries produce several results; use
+// send_query + receive() directly if every one of them matters.
+pg_awaitable<pg::result> async_connection::execute(std::string_view sql, std::span<const char *const> params) {
     auto query = send_query(sql, params);
     if (!query) {
         co_return std::unexpected(query.error());
     }
+
     std::optional<pg::result> last;
-    while (true) {
+    std::optional<pg::error> failure;
+
+    for (;;) {
         auto result = co_await receive();
         if (!result) {
-            co_return std::unexpected(result.error());
+            if (failure) {
+                // Two failures in a row: the stream is not going to terminate
+                // cleanly, so stop rather than spin.
+                break;
+            }
+            // A server-side error still leaves the terminating sentinel unread.
+            // Keep draining so the connection is reusable, then report the
+            // original error.
+            failure = result.error();
+            continue;
         }
         if (!result->has_value()) {
-            break;
+            break; // end of stream
         }
         last = std::move(**result);
+    }
+
+    if (failure) {
+        co_return std::unexpected(std::move(*failure));
     }
     if (!last) {
         co_return std::unexpected(pg::error{"no result returned", pg::errc::unknown});
@@ -376,8 +374,7 @@ pg_awaitable<pg::result> async_connection::execute(std::string_view sql, std::sp
 
 // ── Status helpers ─────────────────────────────────────────────────────────
 
-bool async_connection::is_alive() const noexcept
-{
+bool async_connection::is_alive() const noexcept {
     /*
      * Returns true if the underlying PGconn is in CONNECTION_OK state.
      *
@@ -385,16 +382,18 @@ bool async_connection::is_alive() const noexcept
     return pg_conn_ != nullptr && PQstatus(pg_conn_) == CONNECTION_OK;
 }
 
-int async_connection::socket_fd() const noexcept
-{
+bool async_connection::transaction_aborted() const noexcept {
+    return pg_conn_ != nullptr && PQtransactionStatus(pg_conn_) == PQTRANS_INERROR;
+}
+
+int async_connection::socket_fd() const noexcept {
     /*
      * Returns the raw OS file descriptor of the server connection socket.
      */
     return pg_conn_ != nullptr ? PQsocket(pg_conn_) : -1;
 }
 
-int async_connection::backend_pid() const noexcept
-{
+int async_connection::backend_pid() const noexcept {
     /*
      * Returns the server-side process ID of the PostgreSQL backend.
      *
@@ -404,71 +403,64 @@ int async_connection::backend_pid() const noexcept
 
 // ── Cancellation ───────────────────────────────────────────────────────────
 
-pg_expected<void> async_connection::request_cancel() noexcept
-{
-    /*
-     * IMPLEMENTATION GUIDE:
-     *
-     * What this does:
-     *   Requests server-side cancellation of the current query via a cancel handle.
-     *
-     * Step 1 — If pg_conn_ == nullptr:
-     *             return std::unexpected(pg::error{pg::errc::invalid_state,
-     *                                             "request_cancel on moved-from connection"});
-     * Step 2 — PGcancel* cancel = PQgetCancel(pg_conn_).
-     *           If cancel == nullptr:
-     *             return std::unexpected(pg::error{pg::errc::unknown,
-     *                                             "PQgetCancel returned null"});
-     * Step 3 — char errbuf[256] = {};
-     *           int rc = PQcancel(cancel, errbuf, sizeof(errbuf));
-     * Step 4 — PQfreeCancel(cancel).
-     * Step 5 — If rc == 0:
-     *             return std::unexpected(pg::error{pg::errc::unknown, errbuf});
-     * Step 6 — return {}.
-     *
-     * Key types involved:
-     *   - PGcancel*: opaque cancel handle from PQgetCancel (thread-safe to use)
-     *   - PQcancel: sends the cancel request over a separate connection
-     *   - PQfreeCancel: always frees the handle regardless of success
-     *
-     * Preconditions:
-     *   - pg_conn_ != nullptr.
-     *   - A query is in flight for cancellation to have effect.
-     *
-     * Postconditions:
-     *   - On success: server has received the cancel signal; next receive() will
-     *     return pg_errc::query_canceled.
-     *   - PGcancel handle is always freed.
-     *
-     * Pitfalls:
-     *   - PQrequestCancel is deprecated; use PQgetCancel + PQcancel instead.
-     *   - noexcept: must never throw. Use errbuf for error text.
-     *   - PQcancel is signal-safe and thread-safe; PQgetCancel/PQfreeCancel are not.
-     *
-     * Hint:
-     *   Use a scope guard or RAII wrapper to guarantee PQfreeCancel is called even
-     *   when rc == 0 (the cancel itself failed).
-     */
-    if (this->pg_conn_ == nullptr) {
-        return std::unexpected(pg::error{"request_cancel on moved-from connection", pg::errc::invalid_state});
+pg_awaitable<void> async_connection::request_cancel() {
+    if (pg_conn_ == nullptr) {
+        co_return std::unexpected(pg::error{"request_cancel on moved-from connection", pg::errc::invalid_state});
     }
-    PGcancel* cancel = PQgetCancel(this->pg_conn_);
-    if (cancel == nullptr) {
-        return std::unexpected(pg::error{"PQgetCancel returned null", pg::errc::unknown});
+
+    cancel_connection_handle cancel{PQcancelCreate(pg_conn_)};
+    if (!cancel) {
+        co_return std::unexpected(pg::error{"PQcancelCreate returned null", pg::errc::unknown});
     }
-    char errbuf[256] = {};
-    int rc = PQcancel(cancel, errbuf, sizeof(errbuf));
-    PQfreeCancel(cancel);
-    if (rc == 0) {
-        return std::unexpected(pg::error{errbuf, pg::errc::unknown});
+    if (PQcancelStart(cancel.get()) == 0) {
+        co_return std::unexpected(pg::error{PQcancelErrorMessage(cancel.get()), pg::errc::connection_failure});
     }
-    return {};
+
+    descriptor_observer cancel_socket{executor_};
+    auto wait_type = asio::posix::stream_descriptor::wait_write;
+
+    for (;;) {
+        const int socket = PQcancelSocket(cancel.get());
+        if (socket < 0) {
+            co_return std::unexpected(pg::error{PQcancelErrorMessage(cancel.get()), pg::errc::connection_failure});
+        }
+
+        if (!cancel_socket.fd.is_open() || cancel_socket.fd.native_handle() != socket) {
+            detach_descriptor(cancel_socket.fd);
+            boost::system::error_code assign_error;
+            cancel_socket.fd.assign(socket, assign_error);
+            if (assign_error) {
+                co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
+            }
+        }
+
+        auto [wait_error] = co_await cancel_socket.fd.async_wait(wait_type, asio::as_tuple(asio::use_awaitable));
+        if (wait_error) {
+            co_return std::unexpected(pg::error{wait_error.message(), pg::errc::connection_failure});
+        }
+
+        const auto status = PQcancelPoll(cancel.get());
+        if (status == PGRES_POLLING_OK) {
+            co_return pg_expected<void>{};
+        }
+        if (status == PGRES_POLLING_FAILED) {
+            co_return std::unexpected(pg::error{PQcancelErrorMessage(cancel.get()), pg::errc::connection_failure});
+        }
+        if (status == PGRES_POLLING_READING) {
+            wait_type = asio::posix::stream_descriptor::wait_read;
+        } else if (status == PGRES_POLLING_WRITING) {
+            wait_type = asio::posix::stream_descriptor::wait_write;
+        }
+    }
+}
+
+void async_connection::invalidate() noexcept {
+    cleanup();
 }
 
 // ── Internal result wrapping ───────────────────────────────────────────────
 
-pg_expected<pg::result> async_connection::wrap_result(PGresult* raw)
-{
+pg_expected<pg::result> async_connection::wrap_result(PGresult *raw) {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -521,7 +513,7 @@ pg_expected<pg::result> async_connection::wrap_result(PGresult* raw)
         return pg::detail::result_handle_adopter::make(std::move(result_handle));
     }
 
-    const char* sqlstate = PQresultErrorField(result_handle.get(), PG_DIAG_SQLSTATE);
+    const char *sqlstate = PQresultErrorField(result_handle.get(), PG_DIAG_SQLSTATE);
     std::string msg = PQresultErrorMessage(result_handle.get());
     pg::errc code = sqlstate ? pg::sqlstate_to_errc(sqlstate) : pg::errc::unknown;
     return std::unexpected(pg::error{std::move(msg), sqlstate ? std::string(sqlstate) : "", code});

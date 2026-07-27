@@ -1,339 +1,232 @@
-// Unit tests for with_retry logic.
-// Compile WITHOUT libpq or Boost.Asio — uses mock types only.
-// Integration tests are tagged [integration] and require ATLAS_TEST_DB_URL.
+// Exercises the real atlas::with_retry template. The retry policy is driven by
+// the error the operation reports, so the operations here are lambdas whose
+// outcome the test controls; the pool, the backoff timer and the retry loop
+// itself are the production ones.
 
-#include "atlas/pg/error.hpp"
+#include "async_test_support.hpp"
 
+#include "atlas/async/retry.hpp"
+
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/ut.hpp>
 
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
 #include <expected>
-#include <functional>
-#include <optional>
+#include <limits>
+#include <span>
 #include <string>
-#include <vector>
 
 namespace ut = boost::ut;
-using namespace atlas::pg;
+namespace asio = boost::asio;
 using namespace std::chrono_literals;
 
 namespace {
 
-// ── Mock infrastructure ────────────────────────────────────────────────────
+using atlas::pg::errc;
+using atlas_test::conninfo;
+using atlas_test::run_on;
 
-// Simulates one configured attempt outcome.
-struct attempt_config {
-    bool         succeeds   = true;
-    errc         error_code = errc::unknown;
-    std::string  message    = "";
-};
+using int_result = std::expected<int, atlas::pg::error>;
 
-// Synchronous mock of with_retry — captures the retry loop contract
-// without Asio coroutines or real connections.
-struct mock_retry_runner {
-    std::vector<attempt_config> attempts;  // pre-configured per-attempt outcomes
-    std::size_t                 max_attempts;
-    std::chrono::milliseconds   base_delay;
-    std::chrono::milliseconds   max_delay;
+[[nodiscard]] auto config_for(std::string url, std::size_t max_size, std::chrono::milliseconds timeout)
+    -> atlas::pool_config {
+    atlas::pool_config cfg;
+    cfg.url = std::move(url);
+    cfg.max_size = max_size;
+    cfg.timeout = timeout;
+    return cfg;
+}
 
-    std::size_t                 calls_made   = 0;
-    std::vector<std::chrono::milliseconds> delays_observed;
-
-    // Runs the retry loop synchronously. Returns the final result.
-    std::expected<int, error> run() {
-        std::expected<int, error> last =
-            std::unexpected(error{"no attempts", "", errc::unknown});
-
-        for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
-            ++calls_made;
-
-            std::expected<int, error> res;
-            if (attempt < attempts.size() && !attempts[attempt].succeeds) {
-                res = std::unexpected(
-                    error{attempts[attempt].message, "", attempts[attempt].error_code});
-            } else {
-                res = 42; // success value
-            }
-
-            if (res.has_value()) {
-                return res; // success: stop immediately
-            }
-            if (!res.error().is_retryable()) {
-                return res; // hard error: do not retry
-            }
-
-            last = res;
-
-            if (attempt + 1 == max_attempts) break;
-
-            // Compute and record backoff delay.
-            auto shift = std::min(attempt, std::size_t{20});
-            auto delay = base_delay * static_cast<long long>(1u << shift);
-            if (delay > max_delay) delay = max_delay;
-            delays_observed.push_back(delay);
-        }
-
-        return last;
-    }
-};
-
-auto test_db_url() -> std::optional<std::string> {
-    const char* val = std::getenv("ATLAS_TEST_DB_URL");
-    if (!val) return std::nullopt;
-    return std::string{val};
+[[nodiscard]] auto failure(errc code, std::string message) -> int_result {
+    return std::unexpected(atlas::pg::error{std::move(message), code});
 }
 
 } // namespace
 
-// ── Unit tests ─────────────────────────────────────────────────────────────
-
-ut::suite<"retry/unit/success"> success_suite = [] {
+ut::suite<"async/retry/unit"> retry_unit_suite = [] {
     using namespace ut;
 
-    "succeeds on first attempt — no retry"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 3;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        // No pre-configured failures → first attempt succeeds.
+    "a pool that cannot connect is reported without running the operation"_test = [] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(atlas_test::unreachable_conninfo, 1, 5s)};
 
-        auto result = runner.run();
-
-        expect(result.has_value()) << "must succeed when first attempt is successful";
-        expect(*result == 42);
-        expect(runner.calls_made == 1u) << "only one attempt must be made on first-try success";
-        expect(runner.delays_observed.empty()) << "no delays on single-attempt success";
-    };
-
-    "succeeds after two retries (serialization_failure twice)"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 3;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::serialization_failure, "tx conflict"},
-            {false, errc::serialization_failure, "tx conflict"},
-            {true,  errc::unknown, ""},
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            co_return 1;
         };
 
-        auto result = runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 3, op, 1ms, 5ms));
 
-        expect(result.has_value()) << "must succeed on third attempt";
-        expect(runner.calls_made == 3u) << "must have made 3 attempts total";
+        expect(!res.has_value());
+        expect(res.error().code == errc::connection_failure);
+        expect(calls == 0_i) << "the operation ran without a connection";
+    };
+
+    "backoff saturates before duration multiplication can overflow"_test = [] {
+        constexpr auto huge =
+            std::chrono::milliseconds{std::numeric_limits<std::chrono::milliseconds::rep>::max() / 2 + 1};
+        constexpr auto cap = 500ms;
+
+        expect(atlas::detail::retry_delay(8, huge, cap) == cap);
+        expect(atlas::detail::retry_delay(8, -1ms, cap) == 0ms);
     };
 };
 
-ut::suite<"retry/unit/non_retryable"> non_retryable_suite = [] {
+ut::suite<"async/retry/integration"> retry_integration_suite = [] {
     using namespace ut;
 
-    "unique_violation is not retried"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 5;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::unique_violation, "duplicate key"},
+    const auto url = conninfo();
+    if (!url) {
+        // Reported rather than silently contributing zero tests, so a CI run
+        // without a server is visibly uncovered instead of looking green.
+        skip / "requires a live server via ATLAS_TEST_CONNINFO"_test = [] {};
+        return;
+    }
+
+    "a successful operation runs exactly once"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
+
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            co_return 42;
         };
 
-        auto result = runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 3, op, 1ms, 5ms));
 
-        expect(!result.has_value());
-        expect(result.error().code == errc::unique_violation)
-            << "unique_violation must be propagated immediately";
-        expect(runner.calls_made == 1u)
-            << "must not retry on non-retryable error";
+        expect(res.has_value());
+        expect(res.value() == 42_i);
+        expect(calls == 1_i);
     };
 
-    "syntax_error is not retried"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 3;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::syntax_error, "syntax error at ..."},
+    "a non-retryable error is not retried"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
+
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            co_return failure(errc::unique_violation, "duplicate key");
         };
 
-        auto result = runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 4, op, 1ms, 5ms));
 
-        expect(!result.has_value());
-        expect(result.error().code == errc::syntax_error);
-        expect(runner.calls_made == 1u);
+        expect(!res.has_value());
+        expect(res.error().code == errc::unique_violation);
+        expect(calls == 1_i);
     };
 
-    "not_null_violation is not retried"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 4;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::not_null_violation, "null value"},
+    "a retryable error exhausts the attempt budget"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
+
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            co_return failure(errc::serialization_failure, "could not serialize access");
         };
 
-        auto result = runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 3, op, 1ms, 5ms));
 
-        expect(!result.has_value());
-        expect(result.error().code == errc::not_null_violation);
-        expect(runner.calls_made == 1u);
+        expect(!res.has_value());
+        expect(res.error().code == errc::serialization_failure);
+        expect(calls == 3_i);
     };
-};
 
-ut::suite<"retry/unit/exhaustion"> exhaustion_suite = [] {
-    using namespace ut;
+    "a transient failure is retried until it succeeds"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
 
-    "exhausts max_attempts — last error returned"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 3;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::serialization_failure, "conflict 1"},
-            {false, errc::serialization_failure, "conflict 2"},
-            {false, errc::serialization_failure, "conflict 3"},
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            if (calls < 3) {
+                co_return failure(errc::deadlock_detected, "deadlock detected");
+            }
+            co_return 7;
         };
 
-        auto result = runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 5, op, 1ms, 5ms));
 
-        expect(!result.has_value());
-        expect(result.error().code == errc::serialization_failure)
-            << "last retryable error must be returned after exhaustion";
-        expect(runner.calls_made == 3u);
+        expect(res.has_value());
+        expect(res.value() == 7_i);
+        expect(calls == 3_i);
     };
 
-    "deadlock_detected is retried up to max_attempts"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 2;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::deadlock_detected, "deadlock"},
-            {false, errc::deadlock_detected, "deadlock"},
+    "backoff delays the retries"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
+
+        auto op = [](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            co_return failure(errc::serialization_failure, "could not serialize access");
         };
 
-        auto result = runner.run();
+        const auto started = std::chrono::steady_clock::now();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 3, op, 30ms, 200ms));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
 
-        expect(!result.has_value());
-        expect(result.error().code == errc::deadlock_detected);
-        expect(runner.calls_made == 2u);
+        expect(!res.has_value());
+        // Two waits between three attempts: 30ms + 60ms.
+        expect(elapsed >= 80ms) << "the retries did not back off";
     };
-};
 
-ut::suite<"retry/unit/backoff"> backoff_suite = [] {
-    using namespace ut;
+    // Regression: the lease used to stay in scope across the backoff timer, so a
+    // retrying caller held a connection for the whole delay without using it.
+    "the lease goes back to the pool before the backoff"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
 
-    "backoff delay increases between attempts"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 4;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
+        int calls = 0;
+        std::size_t available_during_backoff = 99;
+
+        auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
+            ++calls;
+            co_return failure(errc::serialization_failure, "could not serialize access");
         };
 
-        runner.run();
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            // Samples the pool while with_retry is waiting out its backoff.
+            auto sampler = [&]() -> asio::awaitable<void> {
+                while (calls < 1) {
+                    co_await atlas_test::sleep_for(5ms);
+                }
+                co_await atlas_test::sleep_for(50ms); // well inside the 300ms backoff
+                available_during_backoff = db.available();
+            };
+            asio::co_spawn(co_await asio::this_coro::executor, sampler(), asio::detached);
 
-        // Delays must be non-decreasing between attempts.
-        expect(runner.delays_observed.size() == 3u)
-            << "3 delays for 4 attempts (no delay after last attempt)";
-        expect(runner.delays_observed[0] <= runner.delays_observed[1])
-            << "delay must not decrease between attempt 0→1";
-        expect(runner.delays_observed[1] <= runner.delays_observed[2])
-            << "delay must not decrease between attempt 1→2";
+            auto res = co_await atlas::with_retry<int>(db, 2, op, 300ms, 300ms);
+            expect(!res.has_value());
+            expect(calls == 2_i);
+            co_return true;
+        }());
+
+        expect(ran);
+        expect(available_during_backoff == 1_ul) << "the connection was held across the backoff";
     };
 
-    "backoff is capped at max_delay"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 5;
-        runner.base_delay   = 100ms;
-        runner.max_delay    = 250ms;
-        runner.attempts = {
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
+    "the operation receives a usable connection"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2, 5s)};
+
+        auto op = [](atlas::pool_connection &conn) -> asio::awaitable<int_result> {
+            auto res = co_await conn.execute("SELECT 1", std::span<const char *const>{});
+            if (!res) {
+                co_return std::unexpected(res.error());
+            }
+            co_return static_cast<int>(res->rows());
         };
 
-        runner.run();
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 2, op, 1ms, 5ms));
 
-        for (const auto& d : runner.delays_observed) {
-            expect(d <= runner.max_delay)
-                << "no delay must exceed max_delay";
-        }
-    };
-
-    "first delay equals base_delay"_test = [] {
-        mock_retry_runner runner;
-        runner.max_attempts = 2;
-        runner.base_delay   = 10ms;
-        runner.max_delay    = 500ms;
-        runner.attempts = {
-            {false, errc::serialization_failure, "x"},
-            {false, errc::serialization_failure, "x"},
-        };
-
-        runner.run();
-
-        expect(!runner.delays_observed.empty());
-        expect(runner.delays_observed[0] == 10ms)
-            << "first delay must equal base_delay (2^0 == 1)";
-    };
-};
-
-ut::suite<"retry/unit/is_retryable"> is_retryable_suite = [] {
-    using namespace ut;
-
-    "serialization_failure is retryable"_test = [] {
-        error e{"", "40001", errc::serialization_failure};
-        expect(e.is_retryable());
-    };
-
-    "deadlock_detected is retryable"_test = [] {
-        error e{"", "40P01", errc::deadlock_detected};
-        expect(e.is_retryable());
-    };
-
-    "connection_failure is retryable"_test = [] {
-        error e{"", "", errc::connection_failure};
-        expect(e.is_retryable());
-    };
-
-    "unique_violation is not retryable"_test = [] {
-        error e{"", "23505", errc::unique_violation};
-        expect(!e.is_retryable());
-    };
-
-    "query_canceled is not retryable"_test = [] {
-        error e{"", "57014", errc::query_canceled};
-        expect(!e.is_retryable());
-    };
-};
-
-// ── Integration tests — require live PostgreSQL ────────────────────────────
-
-ut::suite<"retry/integration"> integration_suite = [] {
-    using namespace ut;
-
-    auto db_url = test_db_url();
-    if (!db_url) return;
-
-    // [integration] with_retry propagates immediate success.
-    "with_retry succeeds on first attempt against live DB"_test = [&db_url] {
-        // Implementation must:
-        //   auto res = co_await with_retry(db, 3,
-        //       [](pool_connection& c) { return c.execute("SELECT 1", {}); });
-        //   expect(res.has_value());
-        expect(db_url.has_value());
-    };
-
-    // [integration] with_retry retries on injected serialization_failure.
-    "with_retry retries on serialization_failure"_test = [&db_url] {
-        // Implementation must:
-        //   Use a counter to inject a serialization_failure on the first call,
-        //   succeed on the second. Verify calls_made == 2.
-        expect(db_url.has_value());
+        expect(res.has_value()) << (res ? "" : res.error().message);
+        expect(res.value() == 1_i);
     };
 };

@@ -1,272 +1,285 @@
-// Unit tests for transaction state machine logic.
-// Compile WITHOUT libpq or Boost.Asio — uses mock types only.
-// Integration tests are tagged [integration] and require ATLAS_TEST_DB_URL.
+// Exercises atlas::transaction against a real server. Transaction semantics are
+// only observable through the database, so this whole file needs
+// ATLAS_TEST_CONNINFO.
 
-#include "atlas/pg/error.hpp"
+#include "async_test_support.hpp"
 
+#include "atlas/async/pool.hpp"
+#include "atlas/async/transaction.hpp"
+
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/ut.hpp>
 
-#include <cstdlib>
-#include <expected>
+#include <chrono>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace ut = boost::ut;
-using namespace atlas::pg;
+namespace asio = boost::asio;
+using namespace std::chrono_literals;
 
 namespace {
 
-// ── Mock infrastructure ────────────────────────────────────────────────────
+using atlas::pg::errc;
+using atlas_test::conninfo;
+using atlas_test::run_on;
+using atlas_test::sleep_for;
 
-struct mock_exec_record {
-    std::string sql;
-    bool        succeeds = true;
-    errc        err_code = errc::unknown;
-};
+constexpr std::span<const char *const> no_params{};
 
-struct mock_conn {
-    std::vector<mock_exec_record> recorded_calls;
-    std::size_t                   call_index = 0;
+[[nodiscard]] auto config_for(std::string url, std::size_t max_size) -> atlas::pool_config {
+    atlas::pool_config cfg;
+    cfg.url = std::move(url);
+    cfg.max_size = max_size;
+    cfg.timeout = 5s;
+    return cfg;
+}
 
-    // Simulates conn_.execute(sql, params) with pre-configured outcomes.
-    std::expected<int, error>
-    execute(std::string_view sql) {
-        recorded_calls.push_back({std::string{sql}, true});
-        if (call_index < recorded_calls.size()) {
-            auto& rec = recorded_calls[call_index++];
-            if (!rec.succeeds) {
-                return std::unexpected(error{"execute failed", "", rec.err_code});
-            }
-        }
-        return 42; // stand-in for a valid result
+// Reports how many rows the table holds, or -1 if the query failed.
+[[nodiscard]] auto count_rows(atlas::pool &db, std::string_view table) -> asio::awaitable<long> {
+    std::string sql{"SELECT count(*) FROM "};
+    sql.append(table);
+
+    auto res = co_await db.execute(sql, no_params);
+    if (!res) {
+        co_return -1;
     }
 
-    void configure_failure(errc code) {
-        if (!recorded_calls.empty()) {
-            recorded_calls.back().succeeds = false;
-            recorded_calls.back().err_code = code;
-        }
+    auto field = res->get(0, 0);
+    if (!field || !field->has_value()) {
+        co_return -1;
     }
-};
+    co_return std::stol(std::string{**field});
+}
 
-// Mock transaction that mirrors the real transaction's state machine
-// without requiring Asio or libpq.
-struct mock_transaction {
-    mock_conn conn;
-    bool      committed_ = false;
-    bool      rollback_spawned_ = false;
-
-    void simulate_commit_success() {
-        // Simulates: auto res = co_await conn_.execute("COMMIT", {});
-        //            if (res) { committed_ = true; }
-        auto res = conn.execute("COMMIT");
-        if (res.has_value()) {
-            committed_ = true;
-        }
+[[nodiscard]] auto reset_table(atlas::pool &db, std::string_view table) -> asio::awaitable<bool> {
+    std::string drop{"DROP TABLE IF EXISTS "};
+    drop.append(table);
+    auto dropped = co_await db.execute(drop, no_params);
+    if (!dropped) {
+        co_return false;
     }
 
-    void simulate_commit_failure() {
-        // Simulates: COMMIT fails — committed_ must NOT be set.
-        // Pre-configure the conn to fail on next execute.
-        // (In reality this comes from the server returning an error.)
-        committed_ = false; // must stay false
-    }
-
-    void simulate_rollback() {
-        // Simulates: co_await do_rollback() + committed_ = true
-        conn.execute("ROLLBACK");
-        committed_ = true;
-    }
-
-    // Simulates the destructor: if (!committed_) spawn rollback.
-    void simulate_destructor() {
-        if (!committed_) {
-            rollback_spawned_ = true;
-            conn.execute("ROLLBACK"); // fire-and-forget in real impl
-        }
-    }
-};
-
-auto test_db_url() -> std::optional<std::string> {
-    const char* val = std::getenv("ATLAS_TEST_DB_URL");
-    if (!val) return std::nullopt;
-    return std::string{val};
+    std::string create{"CREATE TABLE "};
+    create.append(table).append(" (id int)");
+    auto created = co_await db.execute(create, no_params);
+    co_return created.has_value();
 }
 
 } // namespace
 
-// ── Unit tests ─────────────────────────────────────────────────────────────
-
-ut::suite<"transaction/unit/commit"> commit_suite = [] {
+ut::suite<"async/transaction/integration"> transaction_suite = [] {
     using namespace ut;
 
-    "commit() sets committed_ to true on success"_test = [] {
-        mock_transaction tx;
-        expect(!tx.committed_);
+    const auto url = conninfo();
+    if (!url) {
+        // Reported rather than silently contributing zero tests, so a CI run
+        // without a server is visibly uncovered instead of looking green.
+        skip / "requires a live server via ATLAS_TEST_CONNINFO"_test = [] {};
+        return;
+    }
 
-        tx.simulate_commit_success();
+    "a committed transaction persists its writes"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
 
-        expect(tx.committed_) << "committed_ must be true after successful COMMIT";
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_commit"));
+
+            auto tx = co_await db.begin();
+            expect(tx.has_value()) << (tx ? "" : tx.error().message);
+            if (!tx) {
+                co_return false;
+            }
+
+            auto inserted = co_await tx->execute("INSERT INTO atlas_tx_commit VALUES (1)", no_params);
+            expect(inserted.has_value());
+
+            auto committed = co_await tx->commit();
+            expect(committed.has_value());
+
+            expect(co_await count_rows(db, "atlas_tx_commit") == 1L);
+            co_return true;
+        }());
+
+        expect(ran);
     };
 
-    "commit() sends COMMIT to the connection"_test = [] {
-        mock_transaction tx;
-        tx.simulate_commit_success();
+    "an explicit rollback discards its writes"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
 
-        expect(!tx.conn.recorded_calls.empty());
-        expect(tx.conn.recorded_calls.back().sql == "COMMIT");
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_rollback"));
+
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
+
+            auto inserted = co_await tx->execute("INSERT INTO atlas_tx_rollback VALUES (1)", no_params);
+            expect(inserted.has_value());
+
+            auto rolled_back = co_await tx->rollback();
+            expect(rolled_back.has_value());
+
+            expect(co_await count_rows(db, "atlas_tx_rollback") == 0L);
+            co_return true;
+        }());
+
+        expect(ran);
     };
 
-    "commit() failure leaves committed_ false"_test = [] {
-        mock_transaction tx;
-        tx.simulate_commit_failure();
+    "dropping an uncommitted transaction rolls it back"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
 
-        expect(!tx.committed_) << "committed_ must stay false when COMMIT fails";
-    };
-};
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_dtor"));
 
-ut::suite<"transaction/unit/destructor"> destructor_suite = [] {
-    using namespace ut;
+            {
+                auto tx = co_await db.begin();
+                if (!tx) {
+                    expect(false) << tx.error().message;
+                    co_return false;
+                }
 
-    "destructor does NOT fire rollback when committed_ is true"_test = [] {
-        mock_transaction tx;
-        tx.committed_ = true;
+                auto inserted = co_await tx->execute("INSERT INTO atlas_tx_dtor VALUES (1)", no_params);
+                expect(inserted.has_value());
+            } // the destructor fires ROLLBACK detached
 
-        tx.simulate_destructor();
+            co_await sleep_for(200ms);
+            expect(co_await count_rows(db, "atlas_tx_dtor") == 0L);
+            co_return true;
+        }());
 
-        expect(!tx.rollback_spawned_)
-            << "destructor must not spawn rollback when already committed";
-    };
-
-    "destructor fires rollback when committed_ is false"_test = [] {
-        mock_transaction tx;
-        expect(!tx.committed_);
-
-        tx.simulate_destructor();
-
-        expect(tx.rollback_spawned_)
-            << "destructor must spawn rollback when transaction was not committed";
-        expect(!tx.conn.recorded_calls.empty());
-        expect(tx.conn.recorded_calls.back().sql == "ROLLBACK");
+        expect(ran);
     };
 
-    "destructor rollback sends exactly one ROLLBACK"_test = [] {
-        mock_transaction tx;
-        tx.simulate_destructor();
+    "commit on an already finished transaction is rejected"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
 
-        std::size_t rollback_count = 0;
-        for (const auto& call : tx.conn.recorded_calls) {
-            if (call.sql == "ROLLBACK") ++rollback_count;
-        }
-        expect(rollback_count == 1u) << "exactly one ROLLBACK must be issued";
-    };
-};
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
 
-ut::suite<"transaction/unit/rollback"> rollback_suite = [] {
-    using namespace ut;
+            expect((co_await tx->commit()).has_value());
 
-    "rollback() sets committed_ to true"_test = [] {
-        mock_transaction tx;
-        expect(!tx.committed_);
+            auto again = co_await tx->commit();
+            expect(!again.has_value());
+            if (!again) {
+                expect(again.error().code == errc::invalid_state);
+            }
+            co_return true;
+        }());
 
-        tx.simulate_rollback();
-
-        expect(tx.committed_)
-            << "rollback() must set committed_ = true to suppress destructor rollback";
-    };
-
-    "rollback() sends ROLLBACK to the connection"_test = [] {
-        mock_transaction tx;
-        tx.simulate_rollback();
-
-        expect(!tx.conn.recorded_calls.empty());
-        expect(tx.conn.recorded_calls.back().sql == "ROLLBACK");
+        expect(ran);
     };
 
-    "after rollback() destructor does not spawn another rollback"_test = [] {
-        mock_transaction tx;
-        tx.simulate_rollback();    // committed_ = true
-        tx.simulate_destructor();  // must be a no-op
+    "rollback_to undoes only the work after the savepoint"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
 
-        expect(!tx.rollback_spawned_)
-            << "destructor must not spawn rollback after explicit rollback()";
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_savepoint"));
 
-        std::size_t rollback_count = 0;
-        for (const auto& call : tx.conn.recorded_calls) {
-            if (call.sql == "ROLLBACK") ++rollback_count;
-        }
-        expect(rollback_count == 1u) << "only one ROLLBACK must have been issued total";
-    };
-};
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
 
-ut::suite<"transaction/unit/savepoint"> savepoint_suite = [] {
-    using namespace ut;
+            expect((co_await tx->execute("INSERT INTO atlas_tx_savepoint VALUES (1)", no_params)).has_value());
 
-    "savepoint sends SAVEPOINT <name>"_test = [] {
-        mock_conn conn;
-        conn.execute("SAVEPOINT sp1");
+            auto marked = co_await tx->savepoint("checkpoint");
+            expect(marked.has_value()) << (marked ? "" : marked.error().message);
 
-        expect(!conn.recorded_calls.empty());
-        expect(conn.recorded_calls.back().sql == "SAVEPOINT sp1");
-    };
+            expect((co_await tx->execute("INSERT INTO atlas_tx_savepoint VALUES (2)", no_params)).has_value());
 
-    "rollback_to sends ROLLBACK TO SAVEPOINT <name>"_test = [] {
-        mock_conn conn;
-        conn.execute("ROLLBACK TO SAVEPOINT sp1");
+            auto reverted = co_await tx->rollback_to("checkpoint");
+            expect(reverted.has_value()) << (reverted ? "" : reverted.error().message);
 
-        expect(conn.recorded_calls.back().sql == "ROLLBACK TO SAVEPOINT sp1");
-    };
+            auto released = co_await tx->release_savepoint("checkpoint");
+            expect(released.has_value()) << (released ? "" : released.error().message);
 
-    "release_savepoint sends RELEASE SAVEPOINT <name>"_test = [] {
-        mock_conn conn;
-        conn.execute("RELEASE SAVEPOINT sp1");
+            expect((co_await tx->commit()).has_value());
 
-        expect(conn.recorded_calls.back().sql == "RELEASE SAVEPOINT sp1");
-    };
-};
+            expect(co_await count_rows(db, "atlas_tx_savepoint") == 1L);
+            co_return true;
+        }());
 
-// ── Integration tests — require live PostgreSQL ────────────────────────────
-
-ut::suite<"transaction/integration"> integration_suite = [] {
-    using namespace ut;
-
-    auto db_url = test_db_url();
-    if (!db_url) return;
-
-    // [integration] begin + insert + commit → row visible after transaction.
-    "committed insert is visible after transaction"_test = [&db_url] {
-        // Implementation must:
-        //   auto tx = co_await db.begin();
-        //   co_await tx.execute("INSERT INTO ...", {});
-        //   co_await tx.commit();
-        //   auto res = co_await db.execute("SELECT ...", {});
-        //   expect(res->rows() == 1);
-        expect(db_url.has_value());
+        expect(ran);
     };
 
-    // [integration] begin + insert + scope exit → RAII rollback fires, row absent.
-    "uncommitted insert is absent after scope exit"_test = [&db_url] {
-        // Implementation must:
-        //   { auto tx = co_await db.begin();
-        //     co_await tx.execute("INSERT INTO ...", {});
-        //   } // destructor fires ROLLBACK
-        //   auto res = co_await db.execute("SELECT ...", {});
-        //   expect(res->rows() == 0);
-        expect(db_url.has_value());
+    // Regression: savepoint names were concatenated straight into the statement,
+    // so a name carrying a quote and a semicolon ran as SQL.
+    "a savepoint name carrying SQL is treated as an identifier"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_injection"));
+
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
+
+            const std::string payload = R"(sp"; DROP TABLE atlas_tx_injection; --)";
+
+            auto marked = co_await tx->savepoint(payload);
+            expect(marked.has_value()) << (marked ? "" : marked.error().message);
+
+            auto reverted = co_await tx->rollback_to(payload);
+            expect(reverted.has_value()) << (reverted ? "" : reverted.error().message);
+
+            expect((co_await tx->commit()).has_value());
+
+            // The table survives only if the payload never left identifier position.
+            expect(co_await count_rows(db, "atlas_tx_injection") == 0L) << "the injected statement ran";
+            co_return true;
+        }());
+
+        expect(ran);
     };
 
-    // [integration] savepoint + partial rollback_to → correct partial state.
-    "rollback_to savepoint gives correct partial state"_test = [&db_url] {
-        // Implementation must:
-        //   auto tx = co_await db.begin();
-        //   co_await tx.execute("INSERT INTO ... (id) VALUES (1)", {});
-        //   co_await tx.savepoint("sp1");
-        //   co_await tx.execute("INSERT INTO ... (id) VALUES (2)", {});
-        //   co_await tx.rollback_to("sp1");
-        //   co_await tx.commit();
-        //   Verify: row 1 exists, row 2 does not.
-        expect(db_url.has_value());
+    "an unusable savepoint name is rejected before it reaches the server"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
+
+            auto empty = co_await tx->savepoint("");
+            expect(!empty.has_value());
+            if (!empty) {
+                expect(empty.error().code == errc::invalid_argument);
+            }
+
+            using namespace std::string_view_literals;
+            auto embedded_null = co_await tx->savepoint("a\0b"sv);
+            expect(!embedded_null.has_value());
+            if (!embedded_null) {
+                expect(embedded_null.error().code == errc::invalid_argument);
+            }
+
+            expect((co_await tx->rollback()).has_value());
+            co_return true;
+        }());
+
+        expect(ran);
     };
 };

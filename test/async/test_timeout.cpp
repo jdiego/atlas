@@ -1,179 +1,189 @@
-// Unit tests for with_timeout logic.
-// Compile WITHOUT libpq or Boost.Asio — uses mock timer/operation types.
-// Integration tests are tagged [integration] and require ATLAS_TEST_DB_URL.
+// Exercises the real atlas::with_timeout templates. These suites need no
+// server: the operation being raced is a plain Asio timer, and the connection
+// handed to the cancelling overload is a test double that records what
+// with_timeout asks of it.
 
-#include "atlas/pg/error.hpp"
+#include "async_test_support.hpp"
 
+#include "atlas/async/timeout.hpp"
+
+#include <boost/asio/cancellation_signal.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/ut.hpp>
 
 #include <chrono>
-#include <cstdlib>
 #include <expected>
-#include <functional>
 #include <optional>
-#include <string>
-#include <variant>
 
 namespace ut = boost::ut;
-using namespace atlas::pg;
 using namespace std::chrono_literals;
 
 namespace {
 
-// ── Mock timer / race infrastructure ──────────────────────────────────────
-// Models the "race two awaitables" contract without Asio coroutine machinery.
+using atlas::pg::errc;
+using atlas_test::run;
+using atlas_test::sleep_for;
 
-enum class race_winner { operation, timer };
+// Satisfies atlas::cancellable_connection, reproducing what a real backend
+// sends after a cancel: an error result carrying SQLSTATE 57014, and only then
+// the sentinel that ends the stream. A double that reported end-of-stream
+// straight away would hide a drain that stops at the first error.
+struct recording_connection {
+    int cancels = 0;
+    int receives = 0;
+    bool error_reported = false;
+    bool cancel_fails = false;
+    bool drain_fails = false;
+    bool invalidated = false;
 
-// Simulates the outcome of with_timeout:
-//   - If winner == operation and the operation succeeds → return op_result.
-//   - If winner == operation and the operation fails   → propagate op_error.
-//   - If winner == timer                               → return query_canceled.
-template<typename T>
-std::expected<T, error>
-simulate_with_timeout(race_winner winner,
-                      std::expected<T, error> op_result)
-{
-    if (winner == race_winner::operation) {
-        return op_result;
+    [[nodiscard]] boost::asio::awaitable<std::expected<void, atlas::pg::error>> request_cancel() {
+        ++cancels;
+        if (cancel_fails) {
+            co_return std::unexpected(atlas::pg::error{"cancel dispatch failed", errc::connection_failure});
+        }
+        co_return std::expected<void, atlas::pg::error>{};
     }
-    return std::unexpected(error{"operation timed out", "", errc::query_canceled});
-}
 
-struct mock_timer {
-    bool cancelled = false;
-    void cancel() { cancelled = true; }
+    void invalidate() noexcept {
+        invalidated = true;
+    }
+
+    [[nodiscard]] boost::asio::awaitable<std::expected<std::optional<atlas::pg::result>, atlas::pg::error>> receive() {
+        ++receives;
+
+        if (drain_fails) {
+            co_return std::unexpected(atlas::pg::error{"drain failed", errc::connection_failure});
+        }
+        if (!error_reported) {
+            error_reported = true;
+            co_return std::unexpected(
+                atlas::pg::error{"canceling statement due to user request", "57014", errc::query_canceled});
+        }
+        co_return std::optional<atlas::pg::result>{};
+    }
 };
 
-auto test_db_url() -> std::optional<std::string> {
-    const char* val = std::getenv("ATLAS_TEST_DB_URL");
-    if (!val) return std::nullopt;
-    return std::string{val};
+static_assert(atlas::cancellable_connection<recording_connection>);
+
+// An operation that takes `delay` and then reports `value`.
+auto slow_operation(std::chrono::milliseconds delay, int value)
+    -> boost::asio::awaitable<std::expected<int, atlas::pg::error>> {
+    co_await sleep_for(delay);
+    co_return value;
 }
 
 } // namespace
 
-// ── Unit tests ─────────────────────────────────────────────────────────────
-
-ut::suite<"timeout/unit/op_wins"> op_wins_suite = [] {
+ut::suite<"async/timeout"> timeout_suite = [] {
     using namespace ut;
 
-    "operation completes before timeout — result returned"_test = [] {
-        auto op_result = std::expected<int, error>{99};
-        auto result    = simulate_with_timeout(race_winner::operation, op_result);
+    "operation finishing first passes its value through"_test = [] {
+        auto result = run(atlas::with_timeout<int>(500ms, slow_operation(1ms, 7)));
 
-        expect(result.has_value()) << "op winning must return its value";
-        expect(*result == 99);
+        expect(result.has_value());
+        expect(result.value() == 7_i);
     };
 
-    "operation completes before timeout — timer is cancelled"_test = [] {
-        mock_timer timer;
-        // When op wins, the implementation must cancel the timer.
-        // Simulate: if (op won) timer.cancel();
-        bool op_won = true;
-        if (op_won) timer.cancel();
-
-        expect(timer.cancelled) << "timer must be cancelled when op completes first";
-    };
-
-    "non-timeout errors are propagated unchanged"_test = [] {
-        auto op_result = std::expected<int, error>{
-            std::unexpected(error{"unique constraint", "23505", errc::unique_violation})};
-        auto result = simulate_with_timeout(race_winner::operation, op_result);
+    "operation exceeding the deadline reports query_canceled"_test = [] {
+        auto result = run(atlas::with_timeout<int>(20ms, slow_operation(2s, 7)));
 
         expect(!result.has_value());
-        expect(result.error().code == errc::unique_violation)
-            << "non-timeout error must not be wrapped or changed";
-    };
-
-    "serialization_failure propagated unchanged when op wins"_test = [] {
-        auto op_result = std::expected<int, error>{
-            std::unexpected(error{"tx conflict", "40001", errc::serialization_failure})};
-        auto result = simulate_with_timeout(race_winner::operation, op_result);
-
-        expect(!result.has_value());
-        expect(result.error().code == errc::serialization_failure);
-    };
-};
-
-ut::suite<"timeout/unit/timer_wins"> timer_wins_suite = [] {
-    using namespace ut;
-
-    "timer fires before operation — query_canceled returned"_test = [] {
-        auto op_result = std::expected<int, error>{42};
-        auto result    = simulate_with_timeout(race_winner::timer, op_result);
-
-        expect(!result.has_value()) << "timeout must return an error";
-        expect(result.error().code == errc::query_canceled)
-            << "error code must be query_canceled on timeout";
-    };
-
-    "timeout error message is non-empty"_test = [] {
-        auto op_result = std::expected<int, error>{0};
-        auto result    = simulate_with_timeout(race_winner::timer, op_result);
-
-        expect(!result.has_value());
-        expect(!result.error().message.empty()) << "timeout error must have a message";
-    };
-
-    "timer fires — operation result is discarded"_test = [] {
-        // When the timer wins, the operation's (would-be) result must not be returned.
-        // Even if op_result has a value, timeout overrides it.
-        auto op_result = std::expected<int, error>{12345};
-        auto result    = simulate_with_timeout(race_winner::timer, op_result);
-
-        expect(!result.has_value())
-            << "op result must be discarded when timer wins";
-    };
-};
-
-ut::suite<"timeout/unit/duration_semantics"> duration_suite = [] {
-    using namespace ut;
-
-    "zero duration immediately times out (edge case)"_test = [] {
-        // A duration of 0 should expire immediately, causing the timer to win
-        // before the operation gets a chance to run. Simulated here.
-        auto result = simulate_with_timeout(
-            race_winner::timer,
-            std::expected<int, error>{1});
-
         expect(result.error().code == errc::query_canceled);
     };
 
-    "large duration allows slow operations to complete"_test = [] {
-        // A very large duration means op always wins in practice.
-        auto result = simulate_with_timeout(
-            race_winner::operation,
-            std::expected<int, error>{7});
+    "the losing branch is cancelled rather than awaited"_test = [] {
+        const auto started = std::chrono::steady_clock::now();
+        auto result = run(atlas::with_timeout<int>(50ms, slow_operation(10s, 7)));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        expect(!result.has_value());
+        expect(elapsed < 5s) << "with_timeout waited for the abandoned operation";
+    };
+
+    // Regression: the drain used to stop at the first error, which is exactly
+    // what a cancelled query reports, leaving the sentinel unread. A server-side
+    // error does not invalidate PQstatus, so the pool would take the connection
+    // back mid-stream and hand it to the next caller.
+    "timing out cancels the query server-side and drains past the error"_test = [] {
+        recording_connection conn;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.cancels == 1_i) << "request_cancel was never issued";
+        expect(conn.receives == 2_i) << "the drain stopped at the cancellation error, before the sentinel";
+        expect(!conn.invalidated);
+    };
+
+    "completing in time leaves the connection untouched"_test = [] {
+        recording_connection conn;
+
+        auto result = run(atlas::with_timeout<int>(500ms, conn, slow_operation(1ms, 7)));
 
         expect(result.has_value());
-        expect(*result == 7);
+        expect(result.value() == 7_i);
+        expect(conn.cancels == 0_i);
+        expect(conn.receives == 0_i);
+    };
+
+    "a failed cancel invalidates instead of waiting for an uncancelled query"_test = [] {
+        recording_connection conn;
+        conn.cancel_fails = true;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.cancels == 1_i);
+        expect(conn.receives == 0_i);
+        expect(conn.invalidated);
+    };
+
+    "an incomplete drain invalidates the connection"_test = [] {
+        recording_connection conn;
+        conn.drain_fails = true;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.receives == 2_i);
+        expect(conn.invalidated);
     };
 };
 
-// ── Integration tests — require live PostgreSQL ────────────────────────────
-
-ut::suite<"timeout/integration"> integration_suite = [] {
+ut::suite<"async/timeout/cancellation_slot"> timeout_slot_suite = [] {
     using namespace ut;
 
-    auto db_url = test_db_url();
-    if (!db_url) return;
+    "an external slot aborts the operation"_test = [] {
+        boost::asio::io_context ctx;
+        boost::asio::cancellation_signal signal;
 
-    // [integration] Fast query completes before 500 ms timeout.
-    "SELECT 1 completes within 500ms timeout"_test = [&db_url] {
-        // Implementation must:
-        //   auto res = co_await with_timeout(500ms, db.execute("SELECT 1", {}));
-        //   expect(res.has_value());
-        expect(db_url.has_value());
+        auto op = [&]() -> boost::asio::awaitable<std::expected<int, atlas::pg::error>> {
+            // Fire the signal once the race is under way.
+            co_await sleep_for(10ms);
+            signal.emit(boost::asio::cancellation_type::all);
+            co_await sleep_for(5s);
+            co_return 7;
+        };
+
+        auto result = atlas_test::run_on(ctx, atlas::with_timeout<int>(10s, op(), signal.slot()));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
     };
 
-    // [integration] Slow operation (pg_sleep) triggers timeout.
-    "pg_sleep(10) times out with 50ms deadline"_test = [&db_url] {
-        // Implementation must:
-        //   auto res = co_await with_timeout(50ms,
-        //       db.execute("SELECT pg_sleep(10)", {}));
-        //   expect(!res.has_value());
-        //   expect(res.error().code == errc::query_canceled);
-        expect(db_url.has_value());
+    // Regression: the slot handler captures the timer by reference and the
+    // timer dies with the with_timeout frame, so the handler must be gone by
+    // the time with_timeout returns.
+    "emitting after the operation returned is harmless"_test = [] {
+        boost::asio::cancellation_signal signal;
+
+        auto result = run(atlas::with_timeout<int>(500ms, slow_operation(1ms, 7), signal.slot()));
+        expect(result.has_value());
+
+        expect(!signal.slot().has_handler()) << "the handler outlived the timer it references";
+        signal.emit(boost::asio::cancellation_type::all);
     };
 };
