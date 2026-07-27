@@ -100,6 +100,7 @@ ut::suite<"async/connection/integration"> async_connection_integration_suite = [
             }
 
             expect(conn->is_alive());
+            expect(conn->is_nonblocking()) << "the async factory returned a blocking libpq connection";
             expect(conn->socket_fd() >= 0);
             expect(conn->backend_pid() > 0);
             co_return true;

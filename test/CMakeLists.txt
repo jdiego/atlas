@@ -49,7 +49,7 @@ add_executable(${TEST_SUITE} ${TEST_SOURCES})
 
 
 get_target_property(ut_include_dirs Boost::ut INTERFACE_INCLUDE_DIRECTORIES)
-target_include_directories(${TEST_SUITE} PRIVATE ${ut_SOURCE_DIR}/include)
+target_include_directories(${TEST_SUITE} PRIVATE ${ut_SOURCE_DIR}/include ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_link_libraries(${TEST_SUITE} PRIVATE Boost::ut ${MODULE_NAME}::${MODULE_NAME})
 
 

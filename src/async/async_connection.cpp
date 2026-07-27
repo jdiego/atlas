@@ -1,4 +1,5 @@
 #include "atlas/async/async_connection.hpp"
+#include "async/detail/descriptor_observer.hpp"
 #include "atlas/pg/error.hpp"
 #include "atlas/pg/result.hpp"
 #include "pg/detail/result_handle_adopter.hpp"
@@ -34,34 +35,6 @@ namespace {
     }
 }
 
-// Detaches the fd from the descriptor without closing it, so that libpq stays
-// the sole owner of the socket. release() has no non-throwing overload, and a
-// failure here is never actionable — the fd is closed by PQfinish either way.
-void detach_descriptor(asio::posix::stream_descriptor &fd) noexcept {
-    try {
-        if (fd.is_open()) {
-            static_cast<void>(fd.release());
-        }
-    } catch (...) { // NOLINT(bugprone-empty-catch)
-    }
-}
-
-// Observes a socket owned by libpq. The descriptor must release, never close,
-// that socket on every exit path, including exception unwinding.
-struct descriptor_observer {
-    explicit descriptor_observer(executor_type ex) : fd{std::move(ex)} {
-    }
-
-    descriptor_observer(const descriptor_observer &) = delete;
-    descriptor_observer &operator=(const descriptor_observer &) = delete;
-
-    ~descriptor_observer() {
-        detach_descriptor(fd);
-    }
-
-    asio::posix::stream_descriptor fd;
-};
-
 struct cancel_connection_deleter {
     void operator()(PGcancelConn *cancel) const noexcept {
         if (cancel != nullptr) {
@@ -74,8 +47,8 @@ using cancel_connection_handle = std::unique_ptr<PGcancelConn, cancel_connection
 
 // Drives the PQconnectPoll handshake to completion, keeping `fd` in sync with
 // PQsocket(): libpq can swap the socket underneath us during SSL/GSS
-// negotiation. Reassigning unconditionally would fail with already_open.
-[[nodiscard]] pg_awaitable<void> poll_until_connected(PGconn *conn, asio::posix::stream_descriptor &fd) {
+// negotiation, including replacing it with a new socket using the same number.
+[[nodiscard]] pg_awaitable<void> poll_until_connected(PGconn *conn, detail::descriptor_observer &fd) {
     using descriptor = asio::posix::stream_descriptor;
 
     for (;;) {
@@ -96,14 +69,13 @@ using cancel_connection_handle = std::unique_ptr<PGcancelConn, cancel_connection
             co_return std::unexpected(
                 pg::error{"connection socket closed during handshake", pg::errc::connection_failure});
         }
-        if (current_fd != fd.native_handle()) {
-            detach_descriptor(fd);
-            fd.assign(current_fd);
+        if (auto assign_error = fd.mirror(current_fd); assign_error) {
+            co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
         }
 
         const auto wait_type = (status == PGRES_POLLING_READING) ? descriptor::wait_read : descriptor::wait_write;
 
-        auto [ec] = co_await fd.async_wait(wait_type, asio::as_tuple(asio::use_awaitable));
+        auto ec = co_await fd.wait(wait_type);
         if (ec) {
             co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
         }
@@ -179,7 +151,7 @@ void async_connection::cleanup() noexcept {
     if (this->pg_conn_ != nullptr) {
         // Detach before PQfinish: both close the same fd, and letting the
         // descriptor close it after libpq did would hit an unrelated fd.
-        detach_descriptor(this->conn_fd_);
+        detail::detach_descriptor(this->conn_fd_);
         PQfinish(this->pg_conn_);
         this->pg_conn_ = nullptr;
     }
@@ -211,7 +183,7 @@ pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::
         co_return std::unexpected(pg::error{std::move(msg), pg::errc::connection_failure});
     }
 
-    asio::posix::stream_descriptor connection_fd{ex, initial_fd};
+    detail::descriptor_observer connection_fd{ex};
 
     pg_expected<void> polled;
     try {
@@ -219,16 +191,21 @@ pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::
     } catch (...) {
         // Cancellation unwinds through here; never let the descriptor close a
         // socket that libpq is about to close itself.
-        detach_descriptor(connection_fd);
+        connection_fd.detach();
         PQfinish(connection);
         throw;
     }
 
-    detach_descriptor(connection_fd);
+    connection_fd.detach();
 
     if (!polled) {
         PQfinish(connection);
         co_return std::unexpected(polled.error());
+    }
+    if (PQsetnonblocking(connection, 1) != 0) {
+        std::string msg = PQerrorMessage(connection);
+        PQfinish(connection);
+        co_return std::unexpected(pg::error{std::move(msg), pg::errc::connection_failure});
     }
 
     co_return async_connection{connection, ex, cleanup_budget};
@@ -275,10 +252,12 @@ pg_awaitable<void> async_connection::flush() {
             co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
 
-        auto [ec] = co_await conn_fd_.async_wait(asio::posix::stream_descriptor::wait_write,
-                                                 asio::as_tuple(asio::use_awaitable));
-        if (ec) {
-            co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
+        auto ready = co_await detail::wait_read_or_write(conn_fd_);
+        if (!ready) {
+            co_return std::unexpected(pg::error{ready.error().message(), pg::errc::connection_failure});
+        }
+        if (*ready == detail::descriptor_readiness::read && PQconsumeInput(pg_conn_) == 0) {
+            co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
     }
 }
@@ -379,6 +358,10 @@ bool async_connection::is_alive() const noexcept {
     return pg_conn_ != nullptr && PQstatus(pg_conn_) == CONNECTION_OK;
 }
 
+bool async_connection::is_nonblocking() const noexcept {
+    return pg_conn_ != nullptr && PQisnonblocking(pg_conn_) != 0;
+}
+
 bool async_connection::transaction_aborted() const noexcept {
     return pg_conn_ != nullptr && PQtransactionStatus(pg_conn_) == PQTRANS_INERROR;
 }
@@ -413,7 +396,7 @@ pg_awaitable<void> async_connection::request_cancel() {
         co_return std::unexpected(pg::error{PQcancelErrorMessage(cancel.get()), pg::errc::connection_failure});
     }
 
-    descriptor_observer cancel_socket{executor_};
+    detail::descriptor_observer cancel_socket{executor_};
     auto wait_type = asio::posix::stream_descriptor::wait_write;
 
     for (;;) {
@@ -422,16 +405,11 @@ pg_awaitable<void> async_connection::request_cancel() {
             co_return std::unexpected(pg::error{PQcancelErrorMessage(cancel.get()), pg::errc::connection_failure});
         }
 
-        if (!cancel_socket.fd.is_open() || cancel_socket.fd.native_handle() != socket) {
-            detach_descriptor(cancel_socket.fd);
-            boost::system::error_code assign_error;
-            cancel_socket.fd.assign(socket, assign_error);
-            if (assign_error) {
-                co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
-            }
+        if (auto assign_error = cancel_socket.mirror(socket); assign_error) {
+            co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
         }
 
-        auto [wait_error] = co_await cancel_socket.fd.async_wait(wait_type, asio::as_tuple(asio::use_awaitable));
+        auto wait_error = co_await cancel_socket.wait(wait_type);
         if (wait_error) {
             co_return std::unexpected(pg::error{wait_error.message(), pg::errc::connection_failure});
         }

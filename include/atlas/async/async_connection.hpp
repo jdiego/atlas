@@ -66,6 +66,7 @@ public:
     [[nodiscard]] pg_awaitable<pg::result> execute(std::string_view sql, std::span<const char *const> params);
 
     [[nodiscard]] bool is_alive() const noexcept;
+    [[nodiscard]] bool is_nonblocking() const noexcept;
     [[nodiscard]] bool transaction_aborted() const noexcept;
     [[nodiscard]] int socket_fd() const noexcept;
     [[nodiscard]] int backend_pid() const noexcept;
@@ -94,7 +95,7 @@ private:
     // Handles all ExecStatusType values; always calls PQclear on error paths.
     [[nodiscard]] pg_expected<pg::result> wrap_result(PGresult *raw);
 
-    // Empties libpq's output buffer, waiting on writability as needed.
+    // Empties libpq's output buffer while servicing read and write readiness.
     // receive() calls this first so a partially-sent query cannot deadlock.
     [[nodiscard]] pg_awaitable<void> flush();
 
