@@ -26,15 +26,16 @@ namespace atlas {
 
 namespace detail {
 
-template<typename Entity, typename... Tables>
+template <typename Entity, typename... Tables>
 consteval auto table_index() noexcept -> std::size_t {
     std::size_t index = sizeof...(Tables);
 
     [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
         (void)((std::is_same_v<typename std::tuple_element_t<Indices, std::tuple<Tables...>>::entity_type, Entity>
-            ? (index = Indices, true)
-            : false) || ...);
-    }(std::make_index_sequence<sizeof...(Tables)> {});
+                    ? (index = Indices, true)
+                    : false) ||
+               ...);
+    }(std::make_index_sequence<sizeof...(Tables)>{});
 
     return index;
 }
@@ -45,7 +46,7 @@ consteval auto table_index() noexcept -> std::size_t {
 // storage_t
 // ---------------------------------------------------------------------------
 
-template<typename... Tables>
+template <typename... Tables>
 struct storage_t {
     std::tuple<Tables...> tables;
 
@@ -53,8 +54,8 @@ struct storage_t {
 
     // Returns a const reference to the table_t whose entity_type == Entity.
     // Static assertion at compile time if Entity is not registered.
-    template<typename Entity>
-    constexpr const auto& get_table() const noexcept {
+    template <typename Entity>
+    constexpr const auto &get_table() const noexcept {
         constexpr auto index = detail::table_index<Entity, Tables...>();
         static_assert(index < sizeof...(Tables), "Entity is not registered in this storage.");
         // std::get<index> preserves the exact table_t static type.
@@ -62,9 +63,9 @@ struct storage_t {
     }
 
     // Invoke f(table) for each registered table in declaration order.
-    template<typename F>
-    constexpr void for_each_table(F&& f) const {
-        std::apply([&](const auto&... tbl) {(f(tbl), ...);}, tables);
+    template <typename F>
+    constexpr void for_each_table(F &&f) const {
+        std::apply([&](const auto &...tbl) { (f(tbl), ...); }, tables);
     }
 };
 
@@ -72,11 +73,10 @@ struct storage_t {
 // Factory
 // ---------------------------------------------------------------------------
 
-template<typename... Tables>
-constexpr auto make_storage(Tables&&... ts) -> storage_t<std::remove_cvref_t<Tables>...>
-{
+template <typename... Tables>
+constexpr auto make_storage(Tables &&...ts) -> storage_t<std::remove_cvref_t<Tables>...> {
     static_assert((is_table<Tables> && ...), "all arguments must satisfy is_table");
-    return { std::tuple<std::remove_cvref_t<Tables>...>(std::forward<Tables>(ts)...) };
+    return {std::tuple<std::remove_cvref_t<Tables>...>(std::forward<Tables>(ts)...)};
 }
 
 // ---------------------------------------------------------------------------
@@ -85,15 +85,15 @@ constexpr auto make_storage(Tables&&... ts) -> storage_t<std::remove_cvref_t<Tab
 
 namespace detail {
 
-template<typename S>
+template <typename S>
 struct is_storage_impl : std::false_type {};
 
-template<typename... Tables>
+template <typename... Tables>
 struct is_storage_impl<storage_t<Tables...>> : std::true_type {};
 
 } // namespace detail
 
-template<typename S>
+template <typename S>
 concept is_storage = detail::is_storage_impl<std::remove_cvref_t<S>>::value;
 
 } // namespace atlas

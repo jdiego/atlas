@@ -2,8 +2,7 @@
 
 namespace atlas {
 
-std::string apply_ssl_mode(std::string url, ssl_mode mode)
-{
+std::string apply_ssl_mode(std::string url, ssl_mode mode) {
     /*
      * IMPLEMENTATION GUIDE:
      *
@@ -44,7 +43,7 @@ std::string apply_ssl_mode(std::string url, ssl_mode mode)
      * Hint:
      *   std::string_view mode_names[] indexed by static_cast<int>(mode).
      */
-    const char* mode_str = "prefer";
+    const char *mode_str = "prefer";
     switch (mode) {
     case ssl_mode::disable:
         mode_str = "disable";
