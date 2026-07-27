@@ -44,6 +44,7 @@ compile_commands.json
 
 # Caches
 .cache
+.superpowers/
 
 # Check files
 cppcheck.txt
