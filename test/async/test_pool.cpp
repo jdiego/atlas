@@ -4,6 +4,7 @@
 #include "async_test_support.hpp"
 
 #include "atlas/async/pool.hpp"
+#include "atlas/async/timeout.hpp"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -120,6 +121,43 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
             co_await sleep_for(20ms);
             expect(db.available() == 2_ul) << "the lease was not returned to the pool";
             co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "an exhausted cleanup budget invalidates and revives the pooled connection"_test = [&url] {
+        asio::io_context ctx;
+        auto cfg = config_for(*url, 1, 5s);
+        cfg.cleanup_budget = 0ms;
+        atlas::pool db{ctx.get_executor(), cfg};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            {
+                auto lease = co_await db.acquire();
+                expect(lease.has_value()) << (lease ? "" : lease.error().message);
+                if (!lease) {
+                    co_return false;
+                }
+
+                auto timed_out = co_await atlas::with_timeout<atlas::pg::result>(
+                    20ms, *lease, lease->execute("SELECT pg_sleep(10)", no_params));
+
+                expect(!timed_out.has_value());
+                expect(timed_out.error().code == errc::query_canceled);
+                expect(!lease->is_alive()) << "the lease survived an exhausted cleanup budget";
+            }
+
+            auto replacement = co_await db.acquire();
+            expect(replacement.has_value()) << (replacement ? "" : replacement.error().message);
+            if (!replacement) {
+                co_return false;
+            }
+
+            auto result = co_await replacement->execute("SELECT 1", no_params);
+            expect(result.has_value()) << (result ? "" : result.error().message);
+            expect(replacement->is_alive());
+            co_return result.has_value();
         }());
 
         expect(ran);
