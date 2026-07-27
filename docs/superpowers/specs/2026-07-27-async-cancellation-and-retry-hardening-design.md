@@ -8,8 +8,9 @@ statements outside failed transactions.
 
 ## Compatibility
 
-Atlas will require libpq 17 or newer. Version 17 introduced the encrypted,
-non-blocking cancellation API used by this design:
+Atlas will require libpq 18 or newer. The encrypted, non-blocking cancellation
+API used by this design was introduced in version 17 and remains the appropriate
+API in version 18:
 
 - `PQcancelCreate`
 - `PQcancelStart`
@@ -19,7 +20,7 @@ non-blocking cancellation API used by this design:
 - `PQcancelFinish`
 
 CMake will reject older libpq versions during configuration. Ubuntu CI will
-install libpq 17 explicitly and use PostgreSQL 17 for integration tests.
+install libpq 18 explicitly and use PostgreSQL 18 for integration tests.
 
 ## Non-blocking cancellation
 
