@@ -36,8 +36,17 @@ struct recording_connection {
     bool drain_fails = false;
     bool invalidated = false;
 
+    // Stalls stand in for a server that accepted the socket and then stopped
+    // answering — the usual reason a query ran out of time to begin with.
+    bool cancel_stalls = false;
+    bool drain_stalls = false;
+    mutable int budget_reads = 0;
+
     [[nodiscard]] boost::asio::awaitable<std::expected<void, atlas::pg::error>> request_cancel() {
         ++cancels;
+        if (cancel_stalls) {
+            co_await sleep_for(60s);
+        }
         if (cancel_fails) {
             co_return std::unexpected(atlas::pg::error{"cancel dispatch failed", errc::connection_failure});
         }
@@ -48,9 +57,19 @@ struct recording_connection {
         invalidated = true;
     }
 
+    [[nodiscard]] std::chrono::milliseconds cleanup_budget() const noexcept {
+        ++budget_reads;
+        return budget;
+    }
+
+    std::chrono::milliseconds budget{100};
+
     [[nodiscard]] boost::asio::awaitable<std::expected<std::optional<atlas::pg::result>, atlas::pg::error>> receive() {
         ++receives;
 
+        if (drain_stalls) {
+            co_await sleep_for(60s);
+        }
         if (drain_fails) {
             co_return std::unexpected(atlas::pg::error{"drain failed", errc::connection_failure});
         }
@@ -64,6 +83,31 @@ struct recording_connection {
 };
 
 static_assert(atlas::cancellable_connection<recording_connection>);
+
+struct minimal_connection {
+    int receives = 0;
+    bool invalidated = false;
+
+    [[nodiscard]] boost::asio::awaitable<std::expected<void, atlas::pg::error>> request_cancel() {
+        co_return std::expected<void, atlas::pg::error>{};
+    }
+
+    [[nodiscard]] boost::asio::awaitable<std::expected<std::optional<atlas::pg::result>, atlas::pg::error>> receive() {
+        ++receives;
+        if (receives == 1) {
+            co_return std::unexpected(
+                atlas::pg::error{"canceling statement due to user request", "57014", errc::query_canceled});
+        }
+        co_return std::optional<atlas::pg::result>{};
+    }
+
+    void invalidate() noexcept {
+        invalidated = true;
+    }
+};
+
+static_assert(atlas::cancellable_connection<minimal_connection>);
+static_assert(!atlas::cleanup_budget_provider<minimal_connection>);
 
 // An operation that takes `delay` and then reports `value`.
 auto slow_operation(std::chrono::milliseconds delay, int value)
@@ -116,6 +160,17 @@ ut::suite<"async/timeout"> timeout_suite = [] {
         expect(!conn.invalidated);
     };
 
+    "a cancellable adapter does not need a cleanup budget accessor"_test = [] {
+        minimal_connection conn;
+
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(conn.receives == 2_i);
+        expect(!conn.invalidated);
+    };
+
     "completing in time leaves the connection untouched"_test = [] {
         recording_connection conn;
 
@@ -150,6 +205,70 @@ ut::suite<"async/timeout"> timeout_suite = [] {
         expect(result.error().code == errc::query_canceled);
         expect(conn.receives == 2_i);
         expect(conn.invalidated);
+    };
+
+    // Regression: the cleanup path used to have no deadline of its own, so a
+    // server that accepted the cancel connection and then went quiet could hold
+    // with_timeout for far longer than the timeout it was asked to enforce.
+    "a stalled cancel cannot outlast the cleanup budget"_test = [] {
+        recording_connection conn;
+        conn.cancel_stalls = true;
+
+        const auto started = std::chrono::steady_clock::now();
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(elapsed < 2s) << "with_timeout blocked in its own cleanup path";
+        expect(conn.invalidated) << "a connection left mid-cancel must not be reused";
+    };
+
+    "a stalled drain cannot outlast the cleanup budget"_test = [] {
+        recording_connection conn;
+        conn.drain_stalls = true;
+
+        const auto started = std::chrono::steady_clock::now();
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        expect(!result.has_value());
+        expect(result.error().code == errc::query_canceled);
+        expect(elapsed < 2s) << "with_timeout blocked draining a connection that went quiet";
+        expect(conn.invalidated) << "a connection left mid-stream must not be reused";
+    };
+
+    // The budget comes from the connection unless the call overrides it, so a
+    // pool can set it once in pool_config instead of every call site passing it.
+    "the connection's own budget is used by default"_test = [] {
+        recording_connection conn;
+        conn.cancel_stalls = true;
+        conn.budget = 600ms;
+
+        const auto started = std::chrono::steady_clock::now();
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7)));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        expect(!result.has_value());
+        expect(elapsed >= 500ms) << "the connection's budget was ignored in favour of a shorter one";
+        expect(elapsed < 2s);
+        expect(conn.invalidated);
+        expect(conn.budget_reads == 1_i) << "the connection budget was not read exactly once";
+    };
+
+    "an explicit budget overrides the connection's"_test = [] {
+        recording_connection conn;
+        conn.cancel_stalls = true;
+        conn.budget = 10s;
+
+        const auto started = std::chrono::steady_clock::now();
+        auto result = run(atlas::with_timeout<int>(20ms, conn, slow_operation(2s, 7), 100ms));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        expect(!result.has_value());
+        expect(elapsed < 2s) << "the per-call budget did not take precedence";
+        expect(conn.invalidated);
+        expect(conn.budget_reads == 0_i) << "the override should bypass the connection budget accessor";
     };
 };
 

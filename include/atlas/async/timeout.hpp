@@ -1,5 +1,6 @@
 #pragma once
 
+#include "atlas/async/pool_config.hpp"
 #include "atlas/pg/error.hpp"
 #include "atlas/pg/result.hpp"
 
@@ -31,7 +32,25 @@ concept cancellable_connection = requires(Connection &conn) {
     { conn.invalidate() } -> std::same_as<void>;
 };
 
+template <typename Connection>
+concept cleanup_budget_provider = requires(const Connection &conn) {
+    { conn.cleanup_budget() } -> std::same_as<std::chrono::milliseconds>;
+};
+
 namespace detail {
+
+template <typename Connection>
+[[nodiscard]] auto resolve_cleanup_budget(const Connection &conn,
+                                          std::optional<std::chrono::milliseconds> override_budget)
+    -> std::chrono::milliseconds {
+    if (override_budget) {
+        return *override_budget;
+    }
+    if constexpr (cleanup_budget_provider<Connection>) {
+        return conn.cleanup_budget();
+    }
+    return default_cleanup_budget;
+}
 
 // Reads the result stream to its end and discards it, so the connection is
 // reusable.
@@ -59,6 +78,45 @@ template <cancellable_connection Connection>
     }
 
     co_return false;
+}
+
+// Cancels the query still running on `conn` and reads its result stream to the
+// end, so the connection can be handed on. Returns false when the connection is
+// not safe to reuse.
+//
+// The whole sequence runs against `budget`. Both steps talk to the server over
+// the network — request_cancel() even opens a fresh connection to it — and the
+// usual reason a query timed out in the first place is a server that stopped
+// answering. Without a budget here, the cleanup could outlast the deadline
+// with_timeout exists to enforce, by an unbounded margin.
+template <cancellable_connection Connection>
+[[nodiscard]] asio::awaitable<bool> reclaim_connection(Connection &conn, std::chrono::milliseconds budget) {
+    auto ex = co_await asio::this_coro::executor;
+    asio::steady_timer deadline{ex};
+    deadline.expires_after(budget);
+
+    auto reclaim = [&conn]() -> asio::awaitable<bool> {
+        auto cancelled = co_await conn.request_cancel();
+        if (!cancelled) {
+            // The query may still be running, so its results would surface in
+            // whatever the next caller does with this connection.
+            co_return false;
+        }
+        co_return co_await drain_connection(conn);
+    };
+
+    auto wait_deadline = [&deadline]() -> asio::awaitable<void> {
+        auto [ec] = co_await deadline.async_wait(asio::as_tuple(asio::use_awaitable));
+        static_cast<void>(ec);
+    };
+
+    using namespace asio::experimental::awaitable_operators;
+    auto outcome = co_await (reclaim() || wait_deadline());
+
+    if (outcome.index() == 0) {
+        co_return std::get<0>(outcome);
+    }
+    co_return false; // the budget ran out part-way through
 }
 
 // Detaches the handler installed on a cancellation slot. The handler holds a
@@ -113,9 +171,17 @@ with_timeout(Duration duration, asio::awaitable<std::expected<T, pg::error>> op)
 
 // Races `op` against `duration` and, on timeout, aborts the query server-side
 // and drains the connection so the next user of it starts from a clean state.
+//
+// The connection is invalidated whenever that cleanup cannot be completed —
+// including when it overruns its budget. A pooled connection is then replaced
+// on release rather than handed on mid-stream.
+//
+// The cleanup budget comes from the per-call override, then from an optional
+// connection provider, and finally from default_cleanup_budget.
 template <typename T, typename Duration, cancellable_connection Connection>
 [[nodiscard]] asio::awaitable<std::expected<T, pg::error>>
-with_timeout(Duration duration, Connection &conn, asio::awaitable<std::expected<T, pg::error>> op) {
+with_timeout(Duration duration, Connection &conn, asio::awaitable<std::expected<T, pg::error>> op,
+             std::optional<std::chrono::milliseconds> cleanup_budget = std::nullopt) {
     auto ex = co_await asio::this_coro::executor;
     asio::steady_timer timer{ex};
     timer.expires_after(duration);
@@ -132,13 +198,8 @@ with_timeout(Duration duration, Connection &conn, asio::awaitable<std::expected<
         co_return std::get<0>(std::move(result));
     }
 
-    auto cancelled = co_await conn.request_cancel();
-    if (!cancelled) {
-        // The query may still be running. Waiting for it would violate the
-        // deadline, while reusing the connection would expose its result to the
-        // next operation.
-        conn.invalidate();
-    } else if (!co_await detail::drain_connection(conn)) {
+    const auto effective_cleanup_budget = detail::resolve_cleanup_budget(conn, cleanup_budget);
+    if (!co_await detail::reclaim_connection(conn, effective_cleanup_budget)) {
         conn.invalidate();
     }
 
