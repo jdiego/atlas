@@ -3,8 +3,8 @@
 ## Goal
 
 Finish hardening the async engine by making query cancellation non-blocking,
-making retry backoff overflow-safe, and avoiding unnecessary `ROLLBACK`
-statements outside failed transactions.
+bounding the cleanup that follows a timeout, making retry backoff overflow-safe,
+and avoiding unnecessary `ROLLBACK` statements outside failed transactions.
 
 ## Compatibility
 
@@ -50,6 +50,42 @@ connection will also be marked unusable when draining cannot finish cleanly.
 `with_timeout()` will continue returning its existing `query_canceled` timeout
 error, preserving the public timeout contract.
 
+## Bounded timeout cleanup
+
+Cancelling and draining both perform network I/O, so the cleanup that follows a
+query timeout will have its own budget. The default cleanup budget is five
+seconds. A pool can set the value once in `pool_config`; both initially opened
+connections and replacement connections will retain it.
+
+The total time before `with_timeout()` returns may therefore be the requested
+operation timeout plus the cleanup budget. If cancellation or draining does not
+finish within that budget, Atlas will cancel the cleanup coroutine, wait for it
+to stop, and invalidate the connection before returning `query_canceled`.
+Non-positive budgets mean that no cleanup grace period is allowed, so the
+connection is invalidated immediately after the operation timeout.
+
+`cancellable_connection` remains a minimal structural concept. It requires only
+the operations needed to reclaim a connection:
+
+- an awaitable `request_cancel()`;
+- an awaitable `receive()`; and
+- `invalidate()`.
+
+Supplying a default cleanup policy is a separate, optional capability detected
+structurally through `cleanup_budget()`. This keeps `with_timeout()` usable with
+external adapters and test doubles that satisfied the original cancellation
+concept.
+
+The effective cleanup budget follows this precedence:
+
+1. the per-call override passed directly to `with_timeout()`;
+2. `conn.cleanup_budget()` when the connection provides that accessor; or
+3. `default_cleanup_budget`.
+
+Atlas will select the value with explicit control flow rather than
+`std::optional::value_or()`, ensuring that `conn.cleanup_budget()` is not
+evaluated when a per-call override is present.
+
 ## Transaction-aware retry cleanup
 
 `async_connection` will expose whether libpq reports `PQTRANS_INERROR`.
@@ -83,7 +119,12 @@ intended reason.
    to prove the result stream was drained.
 4. Existing retry integration tests will run without PostgreSQL's
    "there is no transaction in progress" warnings.
-5. Build, standalone-header verification, warnings-as-errors, ASan/UBSan, TSan,
+5. Compile-time and runtime timeout tests will cover a cancellable adapter with
+   no budget accessor, a connection-provided budget, and a per-call override.
+6. A PostgreSQL-backed pool test will use a non-positive cleanup budget, prove
+   that the timed-out lease is invalidated, and verify that the pool replaces it
+   with a connection that can execute `SELECT 1`.
+7. Build, standalone-header verification, warnings-as-errors, ASan/UBSan, TSan,
    and PostgreSQL-backed integration tests will remain green.
 
 ## Error handling and resource ownership
