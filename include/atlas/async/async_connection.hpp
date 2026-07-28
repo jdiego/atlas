@@ -91,6 +91,7 @@ private:
     executor_type executor_;
     std::chrono::milliseconds cleanup_budget_ = default_cleanup_budget;
     bool query_in_progress_ = false;
+    bool transport_failed_ = false;
 
     // Takes ownership of raw and maps its status to expected<result, error>.
     // Handles all ExecStatusType values; always calls PQclear on error paths.

@@ -329,8 +329,17 @@ ut::suite<"async/connection/integration"> async_connection_integration_suite = [
                 co_return false;
             }
 
-            auto terminated = co_await conn->execute("SELECT pg_terminate_backend(pg_backend_pid())", no_params);
+            const auto started = std::chrono::steady_clock::now();
+            auto terminated = co_await atlas::with_timeout<atlas::pg::result>(
+                2s, *conn, conn->execute("SELECT pg_terminate_backend(pg_backend_pid())", no_params));
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+
             expect(!terminated.has_value()) << "the backend survived pg_terminate_backend";
+            if (!terminated) {
+                expect(terminated.error().code == errc::connection_failure)
+                    << "dead transport was hidden by the timeout watchdog";
+            }
+            expect(elapsed < 2s) << "execute tried to drain a dead transport";
 
             auto sent = conn->send_query("SELECT 1", no_params);
             expect(!sent.has_value());

@@ -39,6 +39,9 @@ enum class errc {
     if (sqlstate == "57014") {
         return errc::query_canceled;
     }
+    if (sqlstate == "57P01") {
+        return errc::connection_failure;
+    }
     if (sqlstate == "42P01") {
         return errc::undefined_table;
     }

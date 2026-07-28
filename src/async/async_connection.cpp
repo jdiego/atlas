@@ -79,7 +79,8 @@ async_connection::async_connection(PGconn *raw, executor_type ex, std::chrono::m
 async_connection::async_connection(async_connection &&other) noexcept
     : pg_conn_{std::exchange(other.pg_conn_, nullptr)}, conn_fd_{std::move(other.conn_fd_)},
       executor_{std::move(other.executor_)}, cleanup_budget_{other.cleanup_budget_},
-      query_in_progress_{std::exchange(other.query_in_progress_, false)} {
+      query_in_progress_{std::exchange(other.query_in_progress_, false)},
+      transport_failed_{std::exchange(other.transport_failed_, false)} {
 }
 
 async_connection &async_connection::operator=(async_connection &&other) noexcept {
@@ -109,6 +110,7 @@ async_connection &async_connection::operator=(async_connection &&other) noexcept
     this->executor_ = std::move(other.executor_);
     this->cleanup_budget_ = other.cleanup_budget_;
     this->query_in_progress_ = std::exchange(other.query_in_progress_, false);
+    this->transport_failed_ = std::exchange(other.transport_failed_, false);
     return *this;
 }
 
@@ -142,6 +144,7 @@ void async_connection::cleanup() noexcept {
         this->pg_conn_ = nullptr;
     }
     this->query_in_progress_ = false;
+    this->transport_failed_ = false;
 }
 
 // ── Static factory ─────────────────────────────────────────────────────────
@@ -206,7 +209,11 @@ pg_expected<void> async_connection::send_query(std::string_view sql, std::span<c
     if (pg_conn_ == nullptr) {
         return std::unexpected(pg::error{"send_query on moved-from connection", pg::errc::invalid_state});
     }
+    if (transport_failed_) {
+        return std::unexpected(pg::error{"send_query on failed transport", pg::errc::connection_failure});
+    }
     if (PQstatus(pg_conn_) != CONNECTION_OK) {
+        transport_failed_ = true;
         return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
     }
     if (query_in_progress_) {
@@ -226,6 +233,7 @@ pg_expected<void> async_connection::send_query(std::string_view sql, std::span<c
 
     if (rc == 0) {
         if (PQstatus(pg_conn_) != CONNECTION_OK) {
+            transport_failed_ = true;
             return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
         if (PQisBusy(pg_conn_) != 0) {
@@ -249,14 +257,19 @@ pg_awaitable<void> async_connection::flush() {
             co_return pg_expected<void>{};
         }
         if (rc < 0) {
+            transport_failed_ = true;
             co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
 
         auto ready = co_await detail::wait_read_or_write(conn_fd_);
         if (!ready) {
+            if (ready.error() != asio::error::operation_aborted) {
+                transport_failed_ = true;
+            }
             co_return std::unexpected(pg::error{ready.error().message(), pg::errc::connection_failure});
         }
         if (*ready == detail::descriptor_readiness::read && PQconsumeInput(pg_conn_) == 0) {
+            transport_failed_ = true;
             co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
     }
@@ -270,6 +283,9 @@ pg_awaitable<void> async_connection::flush() {
 pg_awaitable<std::optional<pg::result>> async_connection::receive() {
     if (pg_conn_ == nullptr) {
         co_return std::unexpected(pg::error{"receive on moved-from connection", pg::errc::invalid_state});
+    }
+    if (transport_failed_) {
+        co_return std::unexpected(pg::error{"receive on failed transport", pg::errc::connection_failure});
     }
 
     if (auto flushed = co_await flush(); !flushed) {
@@ -290,6 +306,9 @@ pg_awaitable<std::optional<pg::result>> async_connection::receive() {
 
             auto wrapped = wrap_result(raw);
             if (!wrapped) {
+                if (wrapped.error().code == pg::errc::connection_failure) {
+                    transport_failed_ = true;
+                }
                 co_return std::unexpected(wrapped.error());
             }
             co_return std::optional<pg::result>{std::move(*wrapped)};
@@ -298,9 +317,13 @@ pg_awaitable<std::optional<pg::result>> async_connection::receive() {
         auto [ec] = co_await conn_fd_.async_wait(asio::posix::stream_descriptor::wait_read,
                                                  asio::as_tuple(asio::use_awaitable));
         if (ec) {
+            if (ec != asio::error::operation_aborted) {
+                transport_failed_ = true;
+            }
             co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
         }
         if (PQconsumeInput(pg_conn_) == 0) {
+            transport_failed_ = true;
             co_return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
         }
     }
@@ -324,14 +347,12 @@ pg_awaitable<pg::result> async_connection::execute(std::string_view sql, std::sp
         auto result = co_await receive();
         if (!result) {
             if (failure) {
-                // Two failures in a row: the stream is not going to terminate
-                // cleanly, so stop rather than spin.
                 break;
             }
-            // A server-side error still leaves the terminating sentinel unread.
-            // Keep draining so the connection is reusable, then report the
-            // original error.
             failure = result.error();
+            if (failure->code == pg::errc::connection_failure) {
+                break;
+            }
             continue;
         }
         if (!result->has_value()) {
@@ -356,7 +377,7 @@ bool async_connection::is_alive() const noexcept {
      * Returns true if the underlying PGconn is in CONNECTION_OK state.
      *
      */
-    return pg_conn_ != nullptr && PQstatus(pg_conn_) == CONNECTION_OK;
+    return pg_conn_ != nullptr && !transport_failed_ && PQstatus(pg_conn_) == CONNECTION_OK;
 }
 
 bool async_connection::is_nonblocking() const noexcept {
