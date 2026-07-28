@@ -42,7 +42,7 @@ struct acquire_waiter {
 
 struct pool_state : std::enable_shared_from_this<pool_state> {
     pool_state(executor_type executor, pool_config config)
-        : ex{std::move(executor)}, strand{ex}, cfg{std::move(config)} {
+        : ex{std::move(executor)}, strand{ex}, cfg{std::move(config)}, connstr{apply_ssl_mode(cfg.url, cfg.ssl)} {
         // Leases hand out raw pointers into `connections`; reserving up front
         // guarantees no reallocation can invalidate them later.
         connections.reserve(cfg.max_size);
@@ -52,6 +52,7 @@ struct pool_state : std::enable_shared_from_this<pool_state> {
     executor_type ex;
     asio::strand<executor_type> strand;
     pool_config cfg;
+    std::expected<std::string, pg::error> connstr;
 
     // Everything below is touched only from `strand`.
     std::vector<async_connection> connections;
@@ -92,6 +93,10 @@ void pool_state::publish_counts() {
 // Takes the next connection, or suspends until one is released. Runs on the
 // strand, so the free list and waiter queue need no further synchronisation.
 asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquire_slot() {
+    if (!connstr) {
+        co_return std::unexpected(connstr.error());
+    }
+
     if (shutting_down) {
         co_return std::unexpected(pg::error{"pool has no usable connections", pg::errc::connection_failure});
     }
@@ -195,7 +200,6 @@ void pool_state::release(async_connection *conn) {
 // so the slot is reused rather than replaced — move assignment keeps the
 // address stable for anyone still holding it.
 asio::awaitable<void> pool_state::revive(async_connection *slot) {
-    const std::string connstr = apply_ssl_mode(cfg.url, cfg.ssl);
     const std::size_t attempts = std::max<std::size_t>(cfg.max_retries, 1);
 
     for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
@@ -203,7 +207,7 @@ asio::awaitable<void> pool_state::revive(async_connection *slot) {
             co_return;
         }
 
-        auto fresh = co_await async_connection::connect(ex, connstr, cfg.cleanup_budget);
+        auto fresh = co_await async_connection::connect(ex, *connstr, cfg.cleanup_budget);
         if (fresh) {
             *slot = std::move(*fresh);
             hand_off(slot);
@@ -233,14 +237,17 @@ void pool_state::shutdown() {
 // Fills the pool sequentially. A partially filled pool is still usable, so a
 // failed connect is skipped rather than aborting the whole initialisation.
 asio::awaitable<void> pool_state::initialise() {
-    const std::string connstr = apply_ssl_mode(cfg.url, cfg.ssl);
+    if (!connstr) {
+        initialised = true;
+        co_return;
+    }
 
     for (std::size_t i = 0; i < cfg.max_size; ++i) {
         if (shutting_down) {
             co_return;
         }
 
-        auto res = co_await async_connection::connect(ex, connstr, cfg.cleanup_budget);
+        auto res = co_await async_connection::connect(ex, *connstr, cfg.cleanup_budget);
         if (!res) {
             continue;
         }

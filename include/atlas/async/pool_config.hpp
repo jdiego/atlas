@@ -1,6 +1,9 @@
 #pragma once
 
+#include "atlas/pg/error.hpp"
+
 #include <chrono>
+#include <expected>
 #include <string>
 
 namespace atlas {
@@ -23,8 +26,8 @@ struct pool_config {
     std::chrono::milliseconds cleanup_budget = default_cleanup_budget;
 };
 
-// Appends sslmode=<value> to a libpq connection string (keyword=value or URI form).
-// Returns url unchanged if sslmode is already present.
-[[nodiscard]] std::string apply_ssl_mode(std::string url, ssl_mode mode);
+// Validates a libpq connection string and appends sslmode=<value> when libpq's
+// parsed options do not already contain an explicit sslmode.
+[[nodiscard]] std::expected<std::string, pg::error> apply_ssl_mode(std::string url, ssl_mode mode);
 
 } // namespace atlas

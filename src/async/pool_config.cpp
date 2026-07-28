@@ -1,48 +1,54 @@
 #include "atlas/async/pool_config.hpp"
 
+#include <libpq-fe.h>
+
+#include <memory>
+#include <string_view>
+
 namespace atlas {
 
-std::string apply_ssl_mode(std::string url, ssl_mode mode) {
-    /*
-     * IMPLEMENTATION GUIDE:
-     *
-     * What this does:
-     *   Appends a sslmode=<value> key-value pair to a libpq connection string,
-     *   choosing the correct string representation for the ssl_mode enum value.
-     *
-     * Step 1 — Map ssl_mode enum to its libpq string name using a switch:
-     *           disable→"disable", allow→"allow", prefer→"prefer",
-     *           require→"require", verify_ca→"verify-ca",
-     *           verify_full→"verify-full".
-     * Step 2 — If url.find("sslmode=") != std::string::npos, return url unchanged
-     *           to avoid duplicate parameters.
-     * Step 3 — Detect format:
-     *             is_uri = url starts with "postgresql://" or "postgres://".
-     * Step 4 — For keyword=value format: append " sslmode=<mode_str>" (leading space).
-     * Step 5 — For URI format: append "?sslmode=<mode_str>" if '?' is absent in url,
-     *           otherwise "&sslmode=<mode_str>".
-     * Step 6 — Return the modified url.
-     *
-     * Key types involved:
-     *   - ssl_mode: enum class defined in pool_config.hpp
-     *   - std::string: owns the connection string being built
-     *
-     * Preconditions:
-     *   - url is a valid libpq connection string (keyword=value or URI form).
-     *
-     * Postconditions:
-     *   - The returned string has exactly one "sslmode=<mode>" token.
-     *   - If url already contained "sslmode=", it is returned unmodified.
-     *
-     * Pitfalls:
-     *   - verify-ca and verify-full use hyphens in libpq, not underscores.
-     *   - URI form requires "?" before the first query parameter and "&" for
-     *     subsequent ones; check with url.find('?').
-     *   - Do not append twice; the early-return guard prevents duplicates.
-     *
-     * Hint:
-     *   std::string_view mode_names[] indexed by static_cast<int>(mode).
-     */
+namespace {
+
+struct conninfo_deleter {
+    void operator()(PQconninfoOption *value) const noexcept {
+        if (value != nullptr) {
+            PQconninfoFree(value);
+        }
+    }
+};
+
+struct pq_memory_deleter {
+    void operator()(char *value) const noexcept {
+        if (value != nullptr) {
+            PQfreemem(value);
+        }
+    }
+};
+
+} // namespace
+
+std::expected<std::string, pg::error> apply_ssl_mode(std::string url, ssl_mode mode) {
+    if (url.find('\0') != std::string::npos) {
+        return std::unexpected(
+            pg::error{"connection string contains an embedded NUL byte", pg::errc::invalid_argument});
+    }
+
+    char *raw_error = nullptr;
+    std::unique_ptr<char, pq_memory_deleter> parse_error;
+    std::unique_ptr<PQconninfoOption, conninfo_deleter> options{PQconninfoParse(url.c_str(), &raw_error)};
+    parse_error.reset(raw_error);
+
+    if (!options) {
+        const std::string message = parse_error ? parse_error.get() : "could not parse connection string";
+        return std::unexpected(pg::error{message, pg::errc::invalid_argument});
+    }
+
+    for (auto *option = options.get(); option->keyword != nullptr; ++option) {
+        if (std::string_view{option->keyword} == "sslmode" && option->val != nullptr) {
+            return url;
+        }
+    }
+
     const char *mode_str = "prefer";
     switch (mode) {
     case ssl_mode::disable:
@@ -63,10 +69,6 @@ std::string apply_ssl_mode(std::string url, ssl_mode mode) {
     case ssl_mode::verify_full:
         mode_str = "verify-full";
         break;
-    }
-
-    if (url.find("sslmode=") != std::string::npos) {
-        return url;
     }
 
     const bool is_uri = url.starts_with("postgresql://") || url.starts_with("postgres://");

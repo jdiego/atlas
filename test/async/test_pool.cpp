@@ -51,7 +51,61 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
 
     "sslmode is appended to a connection string"_test = [] {
         const auto url = atlas::apply_ssl_mode("host=localhost dbname=atlas", atlas::ssl_mode::require);
-        expect(url.find("sslmode=require") != std::string::npos);
+        expect(url.has_value() >> fatal);
+        expect(url->find("sslmode=require") != std::string::npos);
+    };
+
+    "sslmode text inside a keyword value does not suppress the configured mode"_test = [] {
+        const auto url =
+            atlas::apply_ssl_mode("host=localhost application_name='sslmode=require'", atlas::ssl_mode::disable);
+        expect(url.has_value() >> fatal);
+        expect(url->find("sslmode=disable") != std::string::npos);
+    };
+
+    "an explicit URI sslmode is preserved"_test = [] {
+        const auto url =
+            atlas::apply_ssl_mode("postgresql://localhost/atlas?sslmode=require", atlas::ssl_mode::disable);
+        expect(url.has_value() >> fatal);
+        expect(*url == "postgresql://localhost/atlas?sslmode=require");
+    };
+
+    "an embedded NUL in conninfo is rejected"_test = [] {
+        using namespace std::string_literals;
+
+        const auto url =
+            atlas::apply_ssl_mode(std::string{"host=local\0host", 15}, atlas::ssl_mode::prefer);
+        expect(!url.has_value());
+        expect(url.error().code == errc::invalid_argument);
+    };
+
+    "malformed conninfo is rejected"_test = [] {
+        const auto url = atlas::apply_ssl_mode("host='unterminated", atlas::ssl_mode::prefer);
+        expect(!url.has_value());
+        expect(url.error().code == errc::invalid_argument);
+    };
+
+    "invalid pool config fails every acquire promptly without reconnecting"_test = [] {
+        asio::io_context ctx;
+        auto cfg = config_for("host='unterminated", 1, 5s);
+        cfg.max_retries = 1000;
+        atlas::pool db{ctx.get_executor(), cfg};
+
+        const auto started = std::chrono::steady_clock::now();
+        const bool rejected = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            for (int request = 0; request < 3; ++request) {
+                auto acquired = co_await db.acquire();
+                expect(!acquired.has_value());
+                if (acquired) {
+                    co_return false;
+                }
+                expect(acquired.error().code == errc::invalid_argument);
+            }
+            co_return true;
+        }());
+
+        expect(rejected);
+        expect(std::chrono::steady_clock::now() - started < 1s)
+            << "invalid pool configuration waited or entered a reconnect loop";
     };
 
     "an unreachable server yields a failure, not a hang"_test = [] {
