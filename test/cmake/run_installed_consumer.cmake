@@ -13,6 +13,24 @@ if(NOT install_result EQUAL 0)
     message(FATAL_ERROR "Atlas install failed:\n${install_output}\n${install_error}")
 endif()
 
+file(
+    GLOB_RECURSE atlas_installed_target_files
+    "${ATLAS_PACKAGE_STAGE}/*[Tt]argets.cmake"
+)
+if(NOT atlas_installed_target_files)
+    message(FATAL_ERROR "Atlas install produced no CMake target export")
+endif()
+
+foreach(atlas_target_file IN LISTS atlas_installed_target_files)
+    file(READ "${atlas_target_file}" atlas_target_contents)
+    if(atlas_target_contents MATCHES "(^|[ ;\"])(-Werror|/WX)([ ;\"]|$)")
+        message(FATAL_ERROR
+            "Installed Atlas target exports maintainer warnings-as-errors: "
+            "${atlas_target_file}"
+        )
+    endif()
+endforeach()
+
 execute_process(
     COMMAND
         "${CMAKE_COMMAND}"

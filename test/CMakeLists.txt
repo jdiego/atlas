@@ -62,16 +62,12 @@ target_compile_definitions(${TEST_SUITE} PRIVATE BOOST_UT_DISABLE_MODULE)
 # Enable compiler warnings
 # ######################################################################################################################
 if(NOT TEST_USE_INSTALLED_VERSION)
-    get_target_property(module_target_type ${MODULE_NAME} TYPE)
-    set(module_compile_scope PUBLIC)
-    if(module_target_type STREQUAL "INTERFACE_LIBRARY")
-        set(module_compile_scope INTERFACE)
-    endif()
-
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        target_compile_options(${MODULE_NAME} ${module_compile_scope} -Wall -Wpedantic -Wextra -Werror)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(${MODULE_NAME} PRIVATE -Wall -Wpedantic -Wextra -Werror)
+        target_compile_options(${TEST_SUITE} PRIVATE -Wall -Wpedantic -Wextra -Werror)
     elseif(MSVC)
-        target_compile_options(${MODULE_NAME} ${module_compile_scope} /W4 /WX)
+        target_compile_options(${MODULE_NAME} PRIVATE /W4 /WX)
+        target_compile_options(${TEST_SUITE} PRIVATE /W4 /WX)
     endif()
 endif()
 # ######################################################################################################################
