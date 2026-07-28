@@ -185,6 +185,115 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         expect(ran);
     };
 
+    "a connection returned in an open transaction is replaced"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto acquired = co_await db.acquire();
+            expect(acquired.has_value() >> fatal);
+            if (!acquired) {
+                co_return false;
+            }
+
+            std::optional<atlas::pool_connection> first{std::move(*acquired)};
+            auto pid_result = co_await first->execute("SELECT pg_backend_pid()", no_params);
+            expect(pid_result.has_value() >> fatal);
+            if (!pid_result) {
+                co_return false;
+            }
+
+            auto pid_field = pid_result->get(0, 0);
+            expect(pid_field.has_value() >> fatal);
+            if (!pid_field || !pid_field->has_value()) {
+                co_return false;
+            }
+            const std::string first_pid{pid_field->value()};
+
+            expect((co_await first->execute("BEGIN", no_params)).has_value());
+            first.reset();
+
+            auto second = co_await db.acquire();
+            expect(second.has_value() >> fatal);
+            if (!second) {
+                co_return false;
+            }
+
+            auto second_pid_result = co_await second->execute("SELECT pg_backend_pid()", no_params);
+            expect(second_pid_result.has_value() >> fatal);
+            if (!second_pid_result) {
+                co_return false;
+            }
+
+            auto second_pid_field = second_pid_result->get(0, 0);
+            expect(second_pid_field.has_value() >> fatal);
+            if (!second_pid_field || !second_pid_field->has_value()) {
+                co_return false;
+            }
+
+            expect(std::string{second_pid_field->value()} != first_pid)
+                << "the pool recirculated a session with an open transaction";
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "a connection returned in an aborted transaction is replaced"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto acquired = co_await db.acquire();
+            expect(acquired.has_value() >> fatal);
+            if (!acquired) {
+                co_return false;
+            }
+
+            std::optional<atlas::pool_connection> first{std::move(*acquired)};
+            auto pid_result = co_await first->execute("SELECT pg_backend_pid()", no_params);
+            expect(pid_result.has_value() >> fatal);
+            if (!pid_result) {
+                co_return false;
+            }
+
+            auto pid_field = pid_result->get(0, 0);
+            expect(pid_field.has_value() >> fatal);
+            if (!pid_field || !pid_field->has_value()) {
+                co_return false;
+            }
+            const std::string first_pid{pid_field->value()};
+
+            expect((co_await first->execute("BEGIN", no_params)).has_value());
+            expect(!(co_await first->execute("SELECT 1 / 0", no_params)).has_value());
+            first.reset();
+
+            auto second = co_await db.acquire();
+            expect(second.has_value() >> fatal);
+            if (!second) {
+                co_return false;
+            }
+
+            auto second_pid_result = co_await second->execute("SELECT pg_backend_pid()", no_params);
+            expect(second_pid_result.has_value() >> fatal);
+            if (!second_pid_result) {
+                co_return false;
+            }
+
+            auto second_pid_field = second_pid_result->get(0, 0);
+            expect(second_pid_field.has_value() >> fatal);
+            if (!second_pid_field || !second_pid_field->has_value()) {
+                co_return false;
+            }
+
+            expect(std::string{second_pid_field->value()} != first_pid)
+                << "the pool recirculated a session with an aborted transaction";
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
     "an unsupported COPY invalidates and revives the pooled connection"_test = [&url] {
         asio::io_context ctx;
         atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
@@ -217,6 +326,62 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
             auto result = co_await replacement->execute("SELECT 1", no_params);
             expect(result.has_value()) << (result ? "" : result.error().message);
             co_return result.has_value();
+        }());
+
+        expect(ran);
+    };
+
+    "a connection returned with an unfinished result stream is replaced"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto acquired = co_await db.acquire();
+            expect(acquired.has_value() >> fatal);
+            if (!acquired) {
+                co_return false;
+            }
+
+            std::optional<atlas::pool_connection> first{std::move(*acquired)};
+            auto pid_result = co_await first->execute("SELECT pg_backend_pid()", no_params);
+            expect(pid_result.has_value() >> fatal);
+            if (!pid_result) {
+                co_return false;
+            }
+
+            auto pid_field = pid_result->get(0, 0);
+            expect(pid_field.has_value() >> fatal);
+            if (!pid_field || !pid_field->has_value()) {
+                co_return false;
+            }
+            const std::string first_pid{pid_field->value()};
+
+            expect(first->send_query("SELECT 1", no_params).has_value());
+            auto one = co_await first->receive();
+            expect(one.has_value());
+            first.reset();
+
+            auto second = co_await db.acquire();
+            expect(second.has_value() >> fatal);
+            if (!second) {
+                co_return false;
+            }
+
+            auto second_pid_result = co_await second->execute("SELECT pg_backend_pid()", no_params);
+            expect(second_pid_result.has_value() >> fatal);
+            if (!second_pid_result) {
+                co_return false;
+            }
+
+            auto second_pid_field = second_pid_result->get(0, 0);
+            expect(second_pid_field.has_value() >> fatal);
+            if (!second_pid_field || !second_pid_field->has_value()) {
+                co_return false;
+            }
+
+            expect(std::string{second_pid_field->value()} != first_pid)
+                << "the pool recirculated a session with unread results";
+            co_return true;
         }());
 
         expect(ran);

@@ -380,6 +380,11 @@ bool async_connection::is_alive() const noexcept {
     return pg_conn_ != nullptr && !transport_failed_ && PQstatus(pg_conn_) == CONNECTION_OK;
 }
 
+bool async_connection::is_reusable() const noexcept {
+    return pg_conn_ != nullptr && !transport_failed_ && !query_in_progress_ && PQstatus(pg_conn_) == CONNECTION_OK &&
+           PQtransactionStatus(pg_conn_) == PQTRANS_IDLE;
+}
+
 bool async_connection::is_nonblocking() const noexcept {
     return pg_conn_ != nullptr && PQisnonblocking(pg_conn_) != 0;
 }

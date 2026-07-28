@@ -178,14 +178,14 @@ void pool_state::release(async_connection *conn) {
             return;
         }
 
-        // A dead connection must never go back into circulation: handing it to
-        // a waiter only fails their query and returns it again, so a single
-        // network drop would poison the slot for the life of the pool.
-        if (conn->is_alive()) {
+        // Only a live, idle connection with no unread results is safe to hand
+        // to another borrower.
+        if (conn->is_reusable()) {
             self->hand_off(conn);
             return;
         }
 
+        conn->invalidate();
         asio::co_spawn(
             self->strand, [self, conn]() -> asio::awaitable<void> { co_await self->revive(conn); }, asio::detached);
     });

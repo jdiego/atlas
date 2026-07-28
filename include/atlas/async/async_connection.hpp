@@ -33,6 +33,12 @@ using pg_expected = std::expected<T, pg::error>;
 template <typename T>
 using pg_awaitable = asio::awaitable<pg_expected<T>>;
 
+namespace detail {
+
+struct pool_state;
+
+} // namespace detail
+
 class async_connection {
 public:
     // Non-blocking factory. Calls PQconnectStart then polls via
@@ -84,7 +90,11 @@ public:
     [[nodiscard]] std::chrono::milliseconds cleanup_budget() const noexcept;
 
 private:
+    friend struct detail::pool_state;
+
     explicit async_connection(PGconn *raw, executor_type executor, std::chrono::milliseconds cleanup_budget);
+
+    [[nodiscard]] bool is_reusable() const noexcept;
 
     PGconn *pg_conn_ = nullptr;
     asio::posix::stream_descriptor conn_fd_;
