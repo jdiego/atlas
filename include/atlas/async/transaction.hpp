@@ -8,6 +8,7 @@
 #include <boost/asio/awaitable.hpp>
 
 #include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -25,11 +26,12 @@ public:
     transaction(transaction &&) noexcept;
     transaction &operator=(transaction &&) noexcept;
 
-    // If !committed_: fire-and-forget co_spawn(do_rollback(), detached).
+    // If active: fire-and-forget a rollback that owns the connection lease.
     // Prevents leaving dangling server-side transactions on scope exit.
     ~transaction();
 
-    // Sends COMMIT. Sets committed_ = true on success.
+    // Sends COMMIT and releases the connection lease after PostgreSQL
+    // acknowledges either COMMIT or ROLLBACK.
     [[nodiscard]] asio::awaitable<std::expected<void, pg::error>> commit();
 
     // Sends ROLLBACK and propagates errors. Marks the transaction finished only
@@ -53,12 +55,14 @@ private:
     friend class pool;
     explicit transaction(pool_connection conn, executor_type ex);
 
-    pool_connection conn_;
-    executor_type ex_;
-    bool committed_ = false;
+    enum class state { active, finished };
 
-    // Best-effort ROLLBACK used only by destructor cleanup.
-    asio::awaitable<void> do_rollback();
+    std::optional<pool_connection> conn_;
+    executor_type ex_;
+    state state_ = state::active;
+
+    [[nodiscard]] auto active_connection() -> std::expected<pool_connection *, pg::error>;
+    void finish() noexcept;
 };
 
 } // namespace atlas

@@ -12,6 +12,7 @@
 #include <boost/ut.hpp>
 
 #include <chrono>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string>
@@ -69,6 +70,11 @@ constexpr std::span<const char *const> no_params{};
     co_return created.has_value();
 }
 
+template <typename T>
+[[nodiscard]] auto is_invalid_state(const std::expected<T, atlas::pg::error> &result) -> bool {
+    return !result && result.error().code == errc::invalid_state;
+}
+
 } // namespace
 
 ut::suite<"async/transaction/integration"> transaction_suite = [] {
@@ -105,6 +111,31 @@ ut::suite<"async/transaction/integration"> transaction_suite = [] {
             co_return true;
         }());
 
+        expect(ran);
+    };
+
+    "commit reports PostgreSQL rollback of an aborted transaction"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            expect(co_await reset_table(db, "atlas_tx_aborted_commit"));
+            auto tx = co_await db.begin();
+            expect(tx.has_value() >> fatal);
+
+            auto inserted = co_await tx->execute("INSERT INTO atlas_tx_aborted_commit VALUES (1)", no_params);
+            expect(inserted.has_value());
+            auto failed = co_await tx->execute("SELECT 1 / 0", no_params);
+            expect(!failed.has_value());
+
+            auto committed = co_await tx->commit();
+            expect(!committed.has_value());
+            if (!committed) {
+                expect(committed.error().code == errc::transaction_aborted);
+            }
+            expect(co_await count_rows(db, "atlas_tx_aborted_commit") == 0L);
+            co_return !committed.has_value();
+        }());
         expect(ran);
     };
 
@@ -220,6 +251,54 @@ ut::suite<"async/transaction/integration"> transaction_suite = [] {
                 expect(again.error().code == errc::invalid_state);
             }
             co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "commit releases its lease and rejects every further operation"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            expect(tx.has_value() >> fatal);
+            expect((co_await tx->commit()).has_value());
+
+            auto after_commit = co_await db.execute("SELECT 1", no_params);
+            expect(after_commit.has_value());
+
+            expect(is_invalid_state(co_await tx->execute("SELECT 1", no_params)));
+            expect(is_invalid_state(co_await tx->savepoint("finished")));
+            expect(is_invalid_state(co_await tx->rollback_to("finished")));
+            expect(is_invalid_state(co_await tx->release_savepoint("finished")));
+            expect(is_invalid_state(co_await tx->commit()));
+            expect(is_invalid_state(co_await tx->rollback()));
+            co_return after_commit.has_value();
+        }());
+
+        expect(ran);
+    };
+
+    "rollback releases its lease and rejects every further operation"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            expect(tx.has_value() >> fatal);
+            expect((co_await tx->rollback()).has_value());
+
+            auto after_rollback = co_await db.execute("SELECT 1", no_params);
+            expect(after_rollback.has_value());
+
+            expect(is_invalid_state(co_await tx->execute("SELECT 1", no_params)));
+            expect(is_invalid_state(co_await tx->savepoint("finished")));
+            expect(is_invalid_state(co_await tx->rollback_to("finished")));
+            expect(is_invalid_state(co_await tx->release_savepoint("finished")));
+            expect(is_invalid_state(co_await tx->commit()));
+            expect(is_invalid_state(co_await tx->rollback()));
+            co_return after_rollback.has_value();
         }());
 
         expect(ran);
