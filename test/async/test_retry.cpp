@@ -32,6 +32,7 @@ using atlas_test::conninfo;
 using atlas_test::run_on;
 
 using int_result = std::expected<int, atlas::pg::error>;
+constexpr std::span<const char *const> no_params{};
 
 [[nodiscard]] auto config_for(std::string url, std::size_t max_size, std::chrono::milliseconds timeout)
     -> atlas::pool_config {
@@ -170,6 +171,48 @@ ut::suite<"async/retry/integration"> retry_integration_suite = [] {
         expect(res.has_value());
         expect(res.value() == 7_i);
         expect(calls == 3_i);
+    };
+
+    "a serialization failure inside BEGIN is rolled back before retry"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+
+        int calls = 0;
+        auto op = [&calls](atlas::pool_connection &conn) -> asio::awaitable<int_result> {
+            ++calls;
+
+            auto begun = co_await conn.execute("BEGIN", no_params);
+            if (!begun) {
+                co_return std::unexpected(begun.error());
+            }
+
+            if (calls == 1) {
+                auto failed = co_await conn.execute(
+                    "DO $$ BEGIN RAISE EXCEPTION 'retry' USING ERRCODE = '40001'; END $$", no_params);
+                if (failed) {
+                    co_return failure(errc::unknown, "the serialization failure unexpectedly succeeded");
+                }
+                co_return std::unexpected(failed.error());
+            }
+
+            auto selected = co_await conn.execute("SELECT 42", no_params);
+            if (!selected) {
+                co_return std::unexpected(selected.error());
+            }
+
+            auto committed = co_await conn.execute("COMMIT", no_params);
+            if (!committed) {
+                co_return std::unexpected(committed.error());
+            }
+
+            co_return 42;
+        };
+
+        auto res = run_on(ctx, atlas::with_retry<int>(db, 2, op, 1ms, 5ms));
+
+        expect(res.has_value()) << (res ? "" : res.error().message);
+        expect(res.value_or(0) == 42_i);
+        expect(calls == 2_i);
     };
 
     "backoff delays the retries"_test = [&url] {

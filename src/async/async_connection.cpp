@@ -1,5 +1,6 @@
 #include "atlas/async/async_connection.hpp"
 #include "async/detail/descriptor_observer.hpp"
+#include "async/detail/result_status.hpp"
 #include "atlas/pg/error.hpp"
 #include "atlas/pg/result.hpp"
 #include "pg/detail/result_handle_adopter.hpp"
@@ -14,26 +15,6 @@
 namespace atlas {
 
 namespace {
-
-// The build requires libpq >= 18 (see the pkg_check_modules call in
-// CMakeLists.txt), so every status below is unconditionally available.
-[[nodiscard]] auto is_success_status(ExecStatusType status) noexcept -> bool {
-    switch (status) {
-    case PGRES_EMPTY_QUERY:
-    case PGRES_COMMAND_OK:
-    case PGRES_TUPLES_OK:
-    case PGRES_COPY_OUT:
-    case PGRES_COPY_IN:
-    case PGRES_COPY_BOTH:
-    case PGRES_SINGLE_TUPLE:
-    case PGRES_PIPELINE_SYNC:
-    case PGRES_PIPELINE_ABORTED:
-    case PGRES_TUPLES_CHUNK:
-        return true;
-    default:
-        return false;
-    }
-}
 
 struct cancel_connection_deleter {
     void operator()(PGcancelConn *cancel) const noexcept {
@@ -94,7 +75,8 @@ async_connection::async_connection(PGconn *raw, executor_type ex, std::chrono::m
 
 async_connection::async_connection(async_connection &&other) noexcept
     : pg_conn_{std::exchange(other.pg_conn_, nullptr)}, conn_fd_{std::move(other.conn_fd_)},
-      executor_{std::move(other.executor_)}, cleanup_budget_{other.cleanup_budget_} {
+      executor_{std::move(other.executor_)}, cleanup_budget_{other.cleanup_budget_},
+      query_in_progress_{std::exchange(other.query_in_progress_, false)} {
 }
 
 async_connection &async_connection::operator=(async_connection &&other) noexcept {
@@ -123,6 +105,7 @@ async_connection &async_connection::operator=(async_connection &&other) noexcept
     this->conn_fd_ = std::move(other.conn_fd_);
     this->executor_ = std::move(other.executor_);
     this->cleanup_budget_ = other.cleanup_budget_;
+    this->query_in_progress_ = std::exchange(other.query_in_progress_, false);
     return *this;
 }
 
@@ -155,6 +138,7 @@ void async_connection::cleanup() noexcept {
         PQfinish(this->pg_conn_);
         this->pg_conn_ = nullptr;
     }
+    this->query_in_progress_ = false;
 }
 
 // ── Static factory ─────────────────────────────────────────────────────────
@@ -219,6 +203,12 @@ pg_expected<void> async_connection::send_query(std::string_view sql, std::span<c
     if (pg_conn_ == nullptr) {
         return std::unexpected(pg::error{"send_query on moved-from connection", pg::errc::invalid_state});
     }
+    if (PQstatus(pg_conn_) != CONNECTION_OK) {
+        return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
+    }
+    if (query_in_progress_) {
+        return std::unexpected(pg::error{"another command is already in progress", pg::errc::invalid_state});
+    }
 
     // string_view carries no NUL-terminator guarantee; passing sql.data()
     // straight to libpq would read past the end of the view.
@@ -232,8 +222,15 @@ pg_expected<void> async_connection::send_query(std::string_view sql, std::span<c
                                      0);            // resultFormat: text
 
     if (rc == 0) {
+        if (PQstatus(pg_conn_) != CONNECTION_OK) {
+            return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::connection_failure});
+        }
+        if (PQisBusy(pg_conn_) != 0) {
+            return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::invalid_state});
+        }
         return std::unexpected(pg::error{PQerrorMessage(pg_conn_), pg::errc::unknown});
     }
+    query_in_progress_ = true;
     return {}; // success
 }
 
@@ -284,6 +281,7 @@ pg_awaitable<std::optional<pg::result>> async_connection::receive() {
         if (PQisBusy(pg_conn_) == 0) {
             PGresult *raw = PQgetResult(pg_conn_);
             if (raw == nullptr) {
+                query_in_progress_ = false;
                 co_return std::optional<pg::result>{}; // end of results
             }
 
@@ -488,8 +486,15 @@ pg_expected<pg::result> async_connection::wrap_result(PGresult *raw) {
     }
     ExecStatusType status = PQresultStatus(raw);
     pg::detail::result_handle result_handle{raw};
-    if (is_success_status(status)) {
+    const auto disposition = detail::classify_async_result(status);
+    if (disposition == detail::async_result_disposition::success) {
         return pg::detail::result_handle_adopter::make(std::move(result_handle));
+    }
+    if (disposition == detail::async_result_disposition::unsupported_copy) {
+        result_handle.reset();
+        cleanup();
+        return std::unexpected(
+            pg::error{"COPY protocol is not supported by async_connection", pg::errc::invalid_state});
     }
 
     const char *sqlstate = PQresultErrorField(result_handle.get(), PG_DIAG_SQLSTATE);

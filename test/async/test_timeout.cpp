@@ -108,6 +108,7 @@ struct minimal_connection {
 
 static_assert(atlas::cancellable_connection<minimal_connection>);
 static_assert(!atlas::cleanup_budget_provider<minimal_connection>);
+static_assert(atlas::default_cleanup_budget == 5s);
 
 // An operation that takes `delay` and then reports `value`.
 auto slow_operation(std::chrono::milliseconds delay, int value)

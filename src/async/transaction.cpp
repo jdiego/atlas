@@ -201,19 +201,22 @@ asio::awaitable<std::expected<void, pg::error>> transaction::rollback() {
      * IMPLEMENTATION GUIDE:
      *
      * What this does:
-     *   Explicitly rolls back and suppresses the destructor's auto-rollback.
+     *   Explicitly rolls back and suppresses the destructor's auto-rollback
+     *   only after the server acknowledges the command.
      *
-     * Step 1 — co_await do_rollback() (ROLLBACK sent; errors discarded).
+     * Step 1 — execute ROLLBACK and propagate any error.
      * Step 2 — committed_ = true (suppresses ~transaction() rollback attempt).
      * Step 3 — co_return {} (success).
      *
      * Pitfalls:
-     *   - Errors from ROLLBACK are intentionally discarded because the server
-     *     discards the transaction anyway when the connection closes.
-     *   - Setting committed_ = true is safe here even if ROLLBACK errored.
+     *   - Explicit cleanup is observable and must not hide transport or server
+     *     errors. Best-effort suppression belongs only to destructor cleanup.
      */
     if (!committed_) {
-        co_await do_rollback();
+        auto res = co_await conn_.execute("ROLLBACK", std::span<const char *const>{});
+        if (!res) {
+            co_return std::unexpected(res.error());
+        }
         committed_ = true;
     }
 
@@ -284,7 +287,7 @@ asio::awaitable<void> transaction::do_rollback() {
      * IMPLEMENTATION GUIDE:
      *
      * What this does:
-     *   Sends ROLLBACK; used by rollback() and ~transaction(). Errors are silenced.
+     *   Sends ROLLBACK for destructor cleanup. Errors are silenced.
      *
      * Step 1 — std::ignore = co_await conn_.execute("ROLLBACK", {}).
      *

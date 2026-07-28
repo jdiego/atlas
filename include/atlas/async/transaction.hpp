@@ -32,7 +32,8 @@ public:
     // Sends COMMIT. Sets committed_ = true on success.
     [[nodiscard]] asio::awaitable<std::expected<void, pg::error>> commit();
 
-    // Sends ROLLBACK; sets committed_ = true to suppress the destructor rollback.
+    // Sends ROLLBACK and propagates errors. Marks the transaction finished only
+    // after the server acknowledges it.
     [[nodiscard]] asio::awaitable<std::expected<void, pg::error>> rollback();
 
     // Executes a query within this open transaction.
@@ -56,7 +57,7 @@ private:
     executor_type ex_;
     bool committed_ = false;
 
-    // Sends ROLLBACK; called by rollback() and ~transaction(). Errors are discarded.
+    // Best-effort ROLLBACK used only by destructor cleanup.
     asio::awaitable<void> do_rollback();
 };
 

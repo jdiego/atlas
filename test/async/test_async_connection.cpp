@@ -3,6 +3,7 @@
 
 #include "async_test_support.hpp"
 
+#include "async/detail/result_status.hpp"
 #include "atlas/async/async_connection.hpp"
 #include "atlas/async/timeout.hpp"
 
@@ -75,6 +76,16 @@ ut::suite<"async/connection/unit"> async_connection_unit_suite = [] {
         const auto code = run_on(ctx, connect_failure(ctx, "host= port=0"));
 
         expect(code.has_value());
+    };
+
+    "unsupported protocol transitions are not ordinary results"_test = [] {
+        using atlas::detail::async_result_disposition;
+        using atlas::detail::classify_async_result;
+
+        expect(classify_async_result(PGRES_COPY_OUT) == async_result_disposition::unsupported_copy);
+        expect(classify_async_result(PGRES_COPY_IN) == async_result_disposition::unsupported_copy);
+        expect(classify_async_result(PGRES_COPY_BOTH) == async_result_disposition::unsupported_copy);
+        expect(classify_async_result(PGRES_PIPELINE_ABORTED) == async_result_disposition::error);
     };
 };
 
@@ -259,6 +270,62 @@ ut::suite<"async/connection/integration"> async_connection_integration_suite = [
                 expect(field.has_value());
                 expect(field->has_value());
                 expect(**field == std::string_view{"42"});
+            }
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "send_query classifies an active command as invalid_state"_test = [&url] {
+        asio::io_context ctx;
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto conn = co_await atlas::async_connection::connect(ctx.get_executor(), *url);
+            if (!conn) {
+                expect(false) << conn.error().message;
+                co_return false;
+            }
+
+            auto first = conn->send_query("SELECT pg_sleep(0.1)", no_params);
+            expect(first.has_value()) << (first ? "" : first.error().message);
+
+            auto overlapping = conn->send_query("SELECT 1", no_params);
+            expect(!overlapping.has_value());
+            if (!overlapping) {
+                expect(overlapping.error().code == errc::invalid_state);
+            }
+
+            for (;;) {
+                auto received = co_await conn->receive();
+                expect(received.has_value()) << (received ? "" : received.error().message);
+                if (!received || !received->has_value()) {
+                    break;
+                }
+            }
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "send_query classifies a dead transport as connection_failure"_test = [&url] {
+        asio::io_context ctx;
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto conn = co_await atlas::async_connection::connect(ctx.get_executor(), *url);
+            if (!conn) {
+                expect(false) << conn.error().message;
+                co_return false;
+            }
+
+            auto terminated = co_await conn->execute("SELECT pg_terminate_backend(pg_backend_pid())", no_params);
+            expect(!terminated.has_value()) << "the backend survived pg_terminate_backend";
+
+            auto sent = conn->send_query("SELECT 1", no_params);
+            expect(!sent.has_value());
+            if (!sent) {
+                expect(sent.error().code == errc::connection_failure);
             }
             co_return true;
         }());

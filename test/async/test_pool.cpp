@@ -185,6 +185,43 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         expect(ran);
     };
 
+    "an unsupported COPY invalidates and revives the pooled connection"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            {
+                auto lease = co_await db.acquire();
+                expect(lease.has_value()) << (lease ? "" : lease.error().message);
+                if (!lease) {
+                    co_return false;
+                }
+
+                auto sent = lease->send_query("COPY (SELECT 1) TO STDOUT", no_params);
+                expect(sent.has_value()) << (sent ? "" : sent.error().message);
+
+                auto copy = co_await lease->receive();
+                expect(!copy.has_value()) << "COPY was exposed as an ordinary query result";
+                if (!copy) {
+                    expect(copy.error().code == errc::invalid_state);
+                }
+                expect(!lease->is_alive()) << "a connection left in COPY mode remained reusable";
+            }
+
+            auto replacement = co_await db.acquire();
+            expect(replacement.has_value()) << (replacement ? "" : replacement.error().message);
+            if (!replacement) {
+                co_return false;
+            }
+
+            auto result = co_await replacement->execute("SELECT 1", no_params);
+            expect(result.has_value()) << (result ? "" : result.error().message);
+            co_return result.has_value();
+        }());
+
+        expect(ran);
+    };
+
     "pool::execute leases and releases around the query"_test = [&url] {
         asio::io_context ctx;
         atlas::pool db{ctx.get_executor(), config_for(*url, 1, 5s)};

@@ -134,6 +134,47 @@ ut::suite<"async/transaction/integration"> transaction_suite = [] {
         expect(ran);
     };
 
+    "an explicit rollback reports a terminated backend"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            if (!tx) {
+                expect(false) << tx.error().message;
+                co_return false;
+            }
+
+            auto backend = co_await tx->execute("SELECT pg_backend_pid()", no_params);
+            expect(backend.has_value()) << (backend ? "" : backend.error().message);
+            if (!backend) {
+                co_return false;
+            }
+
+            auto field = backend->get(0, 0);
+            expect(field.has_value());
+            expect(field && field->has_value());
+            if (!field || !field->has_value()) {
+                co_return false;
+            }
+
+            std::string terminate{"SELECT pg_terminate_backend("};
+            terminate.append(**field).append(")");
+            auto terminated = co_await db.execute(terminate, no_params);
+            expect(terminated.has_value()) << (terminated ? "" : terminated.error().message);
+            co_await sleep_for(50ms);
+
+            auto rolled_back = co_await tx->rollback();
+            expect(!rolled_back.has_value()) << "explicit rollback suppressed the transport failure";
+            if (!rolled_back) {
+                expect(!rolled_back.error().message.empty()) << "the rollback error lost its server message";
+            }
+            co_return true;
+        }());
+
+        expect(ran);
+    };
+
     "dropping an uncommitted transaction rolls it back"_test = [&url] {
         asio::io_context ctx;
         atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
