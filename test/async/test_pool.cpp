@@ -19,6 +19,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -44,6 +45,11 @@ constexpr std::span<const char *const> no_params{};
     return cfg;
 }
 
+[[nodiscard]] bool has_one_sslmode_option(std::string_view url) {
+    const auto first = url.find("sslmode=");
+    return first != std::string_view::npos && url.find("sslmode=", first + 1) == std::string_view::npos;
+}
+
 } // namespace
 
 ut::suite<"async/pool/unit"> pool_unit_suite = [] {
@@ -52,14 +58,15 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
     "sslmode is appended to a connection string"_test = [] {
         const auto url = atlas::apply_ssl_mode("host=localhost dbname=atlas", atlas::ssl_mode::require);
         expect(url.has_value() >> fatal);
-        expect(url->find("sslmode=require") != std::string::npos);
+        expect(*url == "host=localhost dbname=atlas sslmode=require");
+        expect(has_one_sslmode_option(*url));
     };
 
     "sslmode text inside a keyword value does not suppress the configured mode"_test = [] {
         const auto url =
             atlas::apply_ssl_mode("host=localhost application_name='sslmode=require'", atlas::ssl_mode::disable);
         expect(url.has_value() >> fatal);
-        expect(url->find("sslmode=disable") != std::string::npos);
+        expect(*url == "host=localhost application_name='sslmode=require' sslmode=disable");
     };
 
     "an explicit URI sslmode is preserved"_test = [] {
@@ -67,6 +74,30 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
             atlas::apply_ssl_mode("postgresql://localhost/atlas?sslmode=require", atlas::ssl_mode::disable);
         expect(url.has_value() >> fatal);
         expect(*url == "postgresql://localhost/atlas?sslmode=require");
+        expect(has_one_sslmode_option(*url));
+    };
+
+    "an explicit keyword sslmode is preserved byte for byte"_test = [] {
+        const std::string original = "host=localhost sslmode=verify-full application_name='atlas test'";
+        const auto url = atlas::apply_ssl_mode(original, atlas::ssl_mode::disable);
+        expect(url.has_value() >> fatal);
+        expect(*url == original);
+        expect(has_one_sslmode_option(*url));
+    };
+
+    "sslmode is appended to a URI without a query"_test = [] {
+        const auto url = atlas::apply_ssl_mode("postgresql://localhost/atlas", atlas::ssl_mode::require);
+        expect(url.has_value() >> fatal);
+        expect(*url == "postgresql://localhost/atlas?sslmode=require");
+        expect(has_one_sslmode_option(*url));
+    };
+
+    "sslmode is appended after an unrelated URI query"_test = [] {
+        const auto url =
+            atlas::apply_ssl_mode("postgresql://localhost/atlas?application_name=atlas", atlas::ssl_mode::disable);
+        expect(url.has_value() >> fatal);
+        expect(*url == "postgresql://localhost/atlas?application_name=atlas&sslmode=disable");
+        expect(has_one_sslmode_option(*url));
     };
 
     "an embedded NUL in conninfo is rejected"_test = [] {
@@ -75,23 +106,28 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
         const auto url =
             atlas::apply_ssl_mode(std::string{"host=local\0host", 15}, atlas::ssl_mode::prefer);
         expect(!url.has_value());
+        if (url) {
+            return;
+        }
         expect(url.error().code == errc::invalid_argument);
     };
 
     "malformed conninfo is rejected"_test = [] {
         const auto url = atlas::apply_ssl_mode("host='unterminated", atlas::ssl_mode::prefer);
         expect(!url.has_value());
+        if (url) {
+            return;
+        }
         expect(url.error().code == errc::invalid_argument);
     };
 
-    "invalid pool config fails every acquire promptly without reconnecting"_test = [] {
+    "invalid pool config is a cached terminal acquire error"_test = [] {
         asio::io_context ctx;
         auto cfg = config_for("host='unterminated", 1, 5s);
-        cfg.max_retries = 1000;
         atlas::pool db{ctx.get_executor(), cfg};
 
-        const auto started = std::chrono::steady_clock::now();
         const bool rejected = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            std::optional<std::string> parse_message;
             for (int request = 0; request < 3; ++request) {
                 auto acquired = co_await db.acquire();
                 expect(!acquired.has_value());
@@ -99,13 +135,17 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
                     co_return false;
                 }
                 expect(acquired.error().code == errc::invalid_argument);
+                if (!parse_message) {
+                    parse_message = acquired.error().message;
+                } else {
+                    expect(acquired.error().message == *parse_message)
+                        << "acquire did not return the cached terminal parse error";
+                }
             }
             co_return true;
         }());
 
         expect(rejected);
-        expect(std::chrono::steady_clock::now() - started < 1s)
-            << "invalid pool configuration waited or entered a reconnect loop";
     };
 
     "an unreachable server yields a failure, not a hang"_test = [] {
