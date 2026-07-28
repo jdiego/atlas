@@ -1,4 +1,5 @@
 #include "atlas/async/async_connection.hpp"
+#include "async/detail/connect_poll_state.hpp"
 #include "async/detail/descriptor_observer.hpp"
 #include "async/detail/result_status.hpp"
 #include "atlas/pg/error.hpp"
@@ -32,34 +33,36 @@ using cancel_connection_handle = std::unique_ptr<PGcancelConn, cancel_connection
 [[nodiscard]] pg_awaitable<void> poll_until_connected(PGconn *conn, detail::descriptor_observer &fd) {
     using descriptor = asio::posix::stream_descriptor;
 
+    auto status = detail::initial_connect_poll_status;
     for (;;) {
-        const PostgresPollingStatusType status = PQconnectPoll(conn);
+        const auto action = detail::connect_poll_action_for(status);
 
-        if (status == PGRES_POLLING_OK) {
+        if (action == detail::connect_poll_action::connected) {
             co_return pg_expected<void>{};
         }
-        if (status == PGRES_POLLING_FAILED) {
+        if (action == detail::connect_poll_action::failed) {
             co_return std::unexpected(pg::error{PQerrorMessage(conn), pg::errc::connection_failure});
         }
-        if (status != PGRES_POLLING_READING && status != PGRES_POLLING_WRITING) {
-            continue; // PGRES_POLLING_ACTIVE is obsolete; poll again.
+        if (action != detail::connect_poll_action::poll_again) {
+            const int current_fd = PQsocket(conn);
+            if (current_fd < 0) {
+                co_return std::unexpected(
+                    pg::error{"connection socket closed during handshake", pg::errc::connection_failure});
+            }
+            if (auto assign_error = fd.mirror(current_fd); assign_error) {
+                co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
+            }
+
+            const auto wait_type =
+                (action == detail::connect_poll_action::wait_read) ? descriptor::wait_read : descriptor::wait_write;
+
+            auto ec = co_await fd.wait(wait_type);
+            if (ec) {
+                co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
+            }
         }
 
-        const int current_fd = PQsocket(conn);
-        if (current_fd < 0) {
-            co_return std::unexpected(
-                pg::error{"connection socket closed during handshake", pg::errc::connection_failure});
-        }
-        if (auto assign_error = fd.mirror(current_fd); assign_error) {
-            co_return std::unexpected(pg::error{assign_error.message(), pg::errc::connection_failure});
-        }
-
-        const auto wait_type = (status == PGRES_POLLING_READING) ? descriptor::wait_read : descriptor::wait_write;
-
-        auto ec = co_await fd.wait(wait_type);
-        if (ec) {
-            co_return std::unexpected(pg::error{ec.message(), pg::errc::connection_failure});
-        }
+        status = PQconnectPoll(conn);
     }
 }
 

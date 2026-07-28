@@ -3,6 +3,7 @@
 
 #include "async_test_support.hpp"
 
+#include "async/detail/connect_poll_state.hpp"
 #include "async/detail/result_status.hpp"
 #include "atlas/async/async_connection.hpp"
 #include "atlas/async/timeout.hpp"
@@ -86,6 +87,15 @@ ut::suite<"async/connection/unit"> async_connection_unit_suite = [] {
         expect(classify_async_result(PGRES_COPY_IN) == async_result_disposition::unsupported_copy);
         expect(classify_async_result(PGRES_COPY_BOTH) == async_result_disposition::unsupported_copy);
         expect(classify_async_result(PGRES_PIPELINE_ABORTED) == async_result_disposition::error);
+    };
+
+    "the connection handshake waits for writability before its first poll"_test = [] {
+        using atlas::detail::connect_poll_action;
+        using atlas::detail::connect_poll_action_for;
+        using atlas::detail::initial_connect_poll_status;
+
+        expect(initial_connect_poll_status == PGRES_POLLING_WRITING);
+        expect(connect_poll_action_for(initial_connect_poll_status) == connect_poll_action::wait_write);
     };
 };
 
