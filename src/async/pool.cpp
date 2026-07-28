@@ -1,5 +1,6 @@
 #include "atlas/async/pool.hpp"
 #include "async/detail/acquire_waiter_queue.hpp"
+#include "async/detail/pool_test_access.hpp"
 #include "atlas/async/transaction.hpp"
 
 #include <boost/asio/co_spawn.hpp>
@@ -155,6 +156,13 @@ void pool_state::wake_all_waiters() {
         waiter->handled = true;
         waiter->timer.cancel();
     }
+}
+
+auto pool_test_access::waiter_count(const pool &db) -> asio::awaitable<std::size_t> {
+    auto state = db.state_;
+    co_return co_await asio::co_spawn(
+        state->strand, [state]() -> asio::awaitable<std::size_t> { co_return state->waiters.size(); },
+        asio::use_awaitable);
 }
 
 void pool_state::release(async_connection *conn) {

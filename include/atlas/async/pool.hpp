@@ -28,6 +28,7 @@ namespace detail {
 // the strand that serialises them. Held by the pool, by every outstanding lease
 // and by any detached work the pool spawns, so none of them can outlive it.
 struct pool_state;
+struct pool_test_access;
 
 } // namespace detail
 
@@ -94,6 +95,8 @@ public:
     [[nodiscard]] std::size_t available() const noexcept; // free connections
 
 private:
+    friend struct detail::pool_test_access;
+
     std::shared_ptr<detail::pool_state> state_;
 };
 

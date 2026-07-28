@@ -3,6 +3,7 @@
 
 #include "async_test_support.hpp"
 
+#include "async/detail/pool_test_access.hpp"
 #include "atlas/async/pool.hpp"
 #include "atlas/async/timeout.hpp"
 
@@ -564,6 +565,31 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
                 expect(second.error().code == errc::query_canceled);
             }
             co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "timed-out acquire is immediately removed from the waiter queue"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 10ms)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto held = co_await db.acquire();
+            expect(held.has_value() >> fatal);
+            if (!held) {
+                co_return false;
+            }
+
+            auto timed_out = co_await db.acquire();
+            expect(!timed_out.has_value());
+            if (!timed_out) {
+                expect(timed_out.error().code == errc::query_canceled);
+            }
+
+            const auto waiter_count = co_await atlas::detail::pool_test_access::waiter_count(db);
+            expect(waiter_count == 0_ul) << "the timed-out acquire remained queued";
+            co_return waiter_count == 0;
         }());
 
         expect(ran);
