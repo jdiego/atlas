@@ -1,3 +1,13 @@
+if(NOT DEFINED ATLAS_CONSUMER_BUILD_JOBS)
+    set(ATLAS_CONSUMER_BUILD_JOBS 1)
+endif()
+if(NOT ATLAS_CONSUMER_BUILD_JOBS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "ATLAS_CONSUMER_BUILD_JOBS must be a positive integer")
+endif()
+if(ATLAS_VALIDATE_CONSUMER_BUILD_JOBS_ONLY)
+    return()
+endif()
+
 file(REMOVE_RECURSE "${ATLAS_PACKAGE_STAGE}" "${ATLAS_CONSUMER_BINARY_DIR}")
 
 execute_process(
@@ -72,7 +82,7 @@ execute_process(
         "${CMAKE_COMMAND}" --build "${ATLAS_CONSUMER_BINARY_DIR}"
         --target atlas_test_suite
         --config "${ATLAS_BUILD_CONFIG}"
-        -j4
+        --parallel "${ATLAS_CONSUMER_BUILD_JOBS}"
     RESULT_VARIABLE build_result
     OUTPUT_VARIABLE build_output
     ERROR_VARIABLE build_error

@@ -119,6 +119,13 @@ if(NOT TEST_USE_INSTALLED_VERSION)
             -DATLAS_SOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}/..
             -P ${CMAKE_CURRENT_LIST_DIR}/cmake/run_installed_consumer.cmake
     )
+    add_test(
+        NAME atlas_installed_consumer_rejects_invalid_jobs
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DATLAS_CONSUMER_SCRIPT=${CMAKE_CURRENT_LIST_DIR}/cmake/run_installed_consumer.cmake
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_consumer_build_jobs.cmake
+    )
     set_tests_properties(
         atlas_package_rejects_old_libpq
         atlas_installed_consumer_contract
