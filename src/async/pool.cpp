@@ -1,4 +1,5 @@
 #include "atlas/async/pool.hpp"
+#include "async/detail/acquire_waiter_queue.hpp"
 #include "atlas/async/transaction.hpp"
 
 #include <boost/asio/co_spawn.hpp>
@@ -11,9 +12,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <functional>
 #include <memory>
-#include <queue>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,16 +24,17 @@ namespace detail {
 
 namespace {
 
-// One suspended acquire(). Lives in a shared_ptr so the waiter callback stays
-// valid even if the acquiring coroutine has already given up.
+// One suspended acquire(). Both the queue and coroutine retain shared ownership
+// until either hand-off/failure or timeout removes the waiter.
 struct acquire_waiter {
     explicit acquire_waiter(executor_type ex) : timer{std::move(ex)} {
     }
 
     asio::steady_timer timer;
     async_connection *conn = nullptr;
+    std::optional<pg::error> failure;
     bool handled = false; // a connection (or a shutdown signal) was delivered
-    bool expired = false; // the timeout won; stop delivering to this waiter
+    bool expired = false; // the timeout won and erased this waiter
 };
 
 } // namespace
@@ -54,7 +55,7 @@ struct pool_state : std::enable_shared_from_this<pool_state> {
     // Everything below is touched only from `strand`.
     std::vector<async_connection> connections;
     std::vector<async_connection *> free;
-    std::queue<std::function<bool(async_connection *)>> waiters;
+    waiter_queue<std::shared_ptr<acquire_waiter>> waiters;
     std::size_t retired = 0; // slots that could not be reconnected
     bool shutting_down = false;
     bool initialised = false; // initialise() has run to completion
@@ -110,16 +111,7 @@ asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquir
 
     auto waiter = std::make_shared<acquire_waiter>(executor_type{strand});
     waiter->timer.expires_after(cfg.timeout);
-
-    waiters.push([waiter](async_connection *conn) {
-        if (waiter->expired) {
-            return false;
-        }
-        waiter->conn = conn;
-        waiter->handled = true;
-        waiter->timer.cancel();
-        return true;
-    });
+    const auto ticket = waiters.push(waiter);
 
     boost::system::error_code ec;
     co_await waiter->timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
@@ -129,39 +121,39 @@ asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquir
     // is a no-op. Trusting `ec` there would drop the connection on the floor —
     // taken out of the free list, never returned.
     if (waiter->handled) {
-        if (waiter->conn == nullptr) {
-            // nullptr is the "no connection is coming" signal, raised by
-            // shutdown and by an initialisation that opened nothing.
-            co_return std::unexpected(pg::error{"pool has no usable connections", pg::errc::connection_failure});
+        if (waiter->failure) {
+            co_return std::unexpected(std::move(*waiter->failure));
         }
         co_return waiter->conn;
     }
 
+    waiters.erase(ticket);
     waiter->expired = true;
     co_return std::unexpected(pg::error{"acquire timed out", pg::errc::query_canceled});
 }
 
-// Gives the connection to the first waiter that still wants it, or parks it.
+// Gives the connection to the first waiter, or parks it.
 void pool_state::hand_off(async_connection *conn) {
-    while (!waiters.empty()) {
-        auto handler = std::move(waiters.front());
-        waiters.pop();
-        if (handler(conn)) {
-            return;
-        }
+    if (!waiters.empty()) {
+        auto waiter = waiters.pop_front();
+        waiter->conn = conn;
+        waiter->handled = true;
+        waiter->timer.cancel();
+        return;
     }
 
     free.push_back(conn);
     publish_counts();
 }
 
-// Signals every waiter with nullptr so their acquire() fails instead of
-// blocking until the timeout.
+// Signals every waiter with a terminal failure instead of blocking until its
+// own timeout.
 void pool_state::wake_all_waiters() {
     while (!waiters.empty()) {
-        auto handler = std::move(waiters.front());
-        waiters.pop();
-        handler(nullptr);
+        auto waiter = waiters.pop_front();
+        waiter->failure.emplace("pool has no usable connections", pg::errc::connection_failure);
+        waiter->handled = true;
+        waiter->timer.cancel();
     }
 }
 

@@ -568,4 +568,45 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
 
         expect(ran);
     };
+
+    "timer and handoff boundary never loses the pool slot"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1, 10ms)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            for (int iteration = 0; iteration < 100; ++iteration) {
+                auto acquired = co_await db.acquire();
+                expect(acquired.has_value() >> fatal);
+                if (!acquired) {
+                    co_return false;
+                }
+                std::optional<atlas::pool_connection> held{std::move(*acquired)};
+
+                auto release = [&held]() -> asio::awaitable<void> {
+                    co_await sleep_for(10ms);
+                    held.reset();
+                };
+                asio::co_spawn(co_await asio::this_coro::executor, release(), asio::detached);
+
+                {
+                    auto boundary = co_await db.acquire();
+                    if (!boundary) {
+                        expect(boundary.error().code == errc::query_canceled);
+                    }
+                }
+
+                const bool returned = co_await atlas_test::wait_until([&db] { return db.available() == 1; }, 1s);
+                expect(returned) << "the only pool slot was lost at the timer/handoff boundary";
+                if (!returned) {
+                    co_return false;
+                }
+            }
+
+            auto usable = co_await db.execute("SELECT 1", no_params);
+            expect(usable.has_value()) << (usable ? "" : usable.error().message);
+            co_return usable.has_value();
+        }());
+
+        expect(ran);
+    };
 };
