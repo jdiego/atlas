@@ -300,8 +300,12 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
                 expect(!lease->is_alive()) << "the connection survived its own backend being terminated";
             }
 
-            // Reconnecting is asynchronous; give it room.
-            co_await sleep_for(500ms);
+            const bool revived = co_await atlas_test::wait_until(
+                [&db] { return db.available() == 1; }, 5s, 10ms);
+            expect(revived) << "the pool did not publish a replacement connection";
+            if (!revived) {
+                co_return false;
+            }
 
             expect(db.size() == 1_ul) << "the slot was retired instead of reconnected";
 

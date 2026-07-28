@@ -90,4 +90,23 @@ template <typename T>
     co_await timer.async_wait(asio::use_awaitable);
 }
 
+template <typename Predicate>
+[[nodiscard]] auto wait_until(
+    Predicate condition,
+    std::chrono::milliseconds timeout,
+    std::chrono::milliseconds interval = std::chrono::milliseconds{10})
+    -> asio::awaitable<bool> {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    asio::steady_timer timer{co_await asio::this_coro::executor};
+
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            co_return false;
+        }
+        timer.expires_after(interval);
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+    co_return true;
+}
+
 } // namespace atlas_test
