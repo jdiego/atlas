@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <string>
 
 namespace ut = boost::ut;
@@ -21,14 +22,13 @@ namespace {
 
 [[nodiscard]] auto acquire_fails_with(atlas::pool_config cfg, atlas::pg::errc expected) -> bool {
     asio::io_context ctx;
-    atlas::pool db{ctx.get_executor(), std::move(cfg)};
+    auto db = std::make_unique<atlas::pool>(ctx.get_executor(), std::move(cfg));
 
     return atlas_test::run_on(ctx, [&]() -> asio::awaitable<bool> {
-        const auto acquired = co_await db.acquire();
-        if (acquired) {
-            co_return false;
-        }
-        co_return acquired.error().code == expected;
+        const auto acquired = co_await db->acquire();
+        const bool matched = !acquired && acquired.error().code == expected;
+        db.reset(); // perpetual recovery ends only when the pool shuts down
+        co_return matched;
     }());
 }
 

@@ -6,6 +6,7 @@
 #include "async/detail/pool_test_access.hpp"
 #include "atlas/async/pool.hpp"
 #include "atlas/async/timeout.hpp"
+#include "atlas/pg/connection.hpp"
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -16,11 +17,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace ut = boost::ut;
@@ -48,6 +51,23 @@ constexpr std::span<const char *const> no_params{};
 [[nodiscard]] bool has_one_sslmode_option(std::string_view url) {
     const auto first = url.find("sslmode=");
     return first != std::string_view::npos && url.find("sslmode=", first + 1) == std::string_view::npos;
+}
+
+[[nodiscard]] auto with_database(std::string connection_info, std::string_view database) -> std::string {
+    if (connection_info.starts_with("postgresql://") || connection_info.starts_with("postgres://")) {
+        const auto scheme = connection_info.find("://") + 3;
+        const auto query = connection_info.find('?', scheme);
+        const auto slash = connection_info.find('/', scheme);
+        const auto end = query == std::string::npos ? connection_info.size() : query;
+        if (slash == std::string::npos || slash > end) {
+            connection_info.insert(end, "/" + std::string{database});
+        } else {
+            connection_info.replace(slash + 1, end - slash - 1, std::string{database});
+        }
+        return connection_info;
+    }
+    connection_info.append(" dbname=").append(database);
+    return connection_info;
 }
 
 } // namespace
@@ -103,8 +123,7 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
     "an embedded NUL in conninfo is rejected"_test = [] {
         using namespace std::string_literals;
 
-        const auto url =
-            atlas::apply_ssl_mode(std::string{"host=local\0host", 15}, atlas::ssl_mode::prefer);
+        const auto url = atlas::apply_ssl_mode(std::string{"host=local\0host", 15}, atlas::ssl_mode::prefer);
         expect(!url.has_value());
         if (url) {
             return;
@@ -150,12 +169,15 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
 
     "an unreachable server yields a failure, not a hang"_test = [] {
         asio::io_context ctx;
-        atlas::pool db{ctx.get_executor(), config_for(atlas_test::unreachable_conninfo, 1, 5s)};
+        auto db =
+            std::make_unique<atlas::pool>(ctx.get_executor(), config_for(atlas_test::unreachable_conninfo, 1, 5s));
 
         // pool_connection has no default constructor, so the lease cannot cross
         // co_spawn's completion handler; report the error code instead.
         const auto code = run_on(ctx, [&]() -> asio::awaitable<std::optional<errc>> {
-            auto res = co_await db.acquire();
+            auto res = co_await db->acquire();
+            expect(db->size() == 0_ul);
+            db.reset(); // perpetual recovery ends only when the pool shuts down
             if (res) {
                 co_return std::nullopt;
             }
@@ -166,7 +188,6 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
         if (code) {
             expect(*code == errc::connection_failure);
         }
-        expect(db.size() == 0_ul);
     };
 
     // Regression: initialisation used to be co_spawned with a raw `this`, so a
@@ -182,6 +203,65 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
         ctx.run(); // the detached coroutine finishes after the pool is gone
         expect(true);
     };
+
+    "destroying the pool cancels recovery backoff and wakes a later acquire"_test = [] {
+        asio::io_context ctx;
+        auto cfg = config_for(atlas_test::unreachable_conninfo, 1, 10s);
+        cfg.max_retries = 1;
+        cfg.reconnect_initial_delay = 5s;
+        cfg.reconnect_max_delay = 5s;
+        auto db = std::make_unique<atlas::pool>(ctx.get_executor(), cfg);
+
+        const auto run_started = std::chrono::steady_clock::now();
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            // Initialisation was spawned first and may win the strand race. The
+            // zero-open pass still owes this first caller exactly one failure.
+            auto initial = co_await db->acquire();
+            expect(!initial.has_value());
+            if (initial) {
+                co_return false;
+            }
+            expect(initial.error().code == errc::connection_failure);
+
+            // Let the missing slot enter its five-second recovery backoff, then
+            // prove a later caller waits for that recovery instead of receiving
+            // the initial pass's terminal notification.
+            co_await sleep_for(50ms);
+            bool finished = false;
+            std::optional<errc> failure;
+            auto later_acquire = [&]() -> asio::awaitable<void> {
+                auto result = co_await db->acquire();
+                if (!result) {
+                    failure = result.error().code;
+                }
+                finished = true;
+            };
+            asio::co_spawn(co_await asio::this_coro::executor, later_acquire(), asio::detached);
+
+            co_await sleep_for(20ms);
+            const auto queued = co_await atlas::detail::pool_test_access::waiter_count(*db);
+            expect(queued == 1_ul) << "a later acquire did not wait for background recovery";
+            expect(!finished) << "the later acquire failed before pool shutdown";
+            const bool was_waiting = queued == 1 && !finished;
+
+            const auto shutdown_at = std::chrono::steady_clock::now();
+            db.reset();
+            const bool woke = co_await atlas_test::wait_until([&finished] { return finished; }, 1s, 10ms);
+            const auto shutdown_time = std::chrono::steady_clock::now() - shutdown_at;
+
+            expect(woke) << "shutdown left the acquire asleep in recovery backoff";
+            expect(shutdown_time < 1s) << "shutdown waited for the five-second reconnect delay";
+            expect(failure.has_value());
+            if (failure) {
+                expect(*failure == errc::connection_failure);
+            }
+            co_return was_waiting && woke && failure == errc::connection_failure;
+        }());
+        const auto run_time = std::chrono::steady_clock::now() - run_started;
+
+        expect(run_time < 1s) << "the uncancelled recovery timer kept the executor alive";
+        expect(ran);
+    };
 };
 
 ut::suite<"async/pool/integration"> pool_integration_suite = [] {
@@ -194,6 +274,69 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         skip / "requires a live server via ATLAS_TEST_CONNINFO"_test = [] {};
         return;
     }
+
+    "pool recovers a database unavailable during initialisation"_test = [&url] {
+        const std::string database = "atlas_recovery_" + std::to_string(::getpid());
+        const std::string quoted_name = "\"" + database + "\"";
+        auto admin = atlas::pg::connection::connect(*url);
+        expect(admin.has_value() >> fatal);
+        if (!admin) {
+            return;
+        }
+
+        auto absent = admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)");
+        expect(absent.has_value() >> fatal);
+        if (!absent) {
+            return;
+        }
+
+        asio::io_context ctx;
+        auto cfg = config_for(with_database(*url, database), 1, 5s);
+        cfg.max_retries = 1;
+        cfg.reconnect_initial_delay = 20ms;
+        cfg.reconnect_max_delay = 100ms;
+
+        const bool ran = [&] {
+            atlas::pool recovering_pool{ctx.get_executor(), cfg};
+            return run_on(ctx, [&]() -> asio::awaitable<bool> {
+                // Whether queued during initialisation or scheduled just after
+                // it, the first caller observes the zero-open pass's last error.
+                auto first = co_await recovering_pool.acquire();
+                expect(!first.has_value());
+                if (first) {
+                    co_return false;
+                }
+                expect(first.error().code == errc::connection_failure);
+
+                auto created = admin->exec("CREATE DATABASE " + quoted_name);
+                expect(created.has_value());
+                if (!created) {
+                    co_return false;
+                }
+
+                const bool recovered = co_await atlas_test::wait_until(
+                    [&recovering_pool] { return recovering_pool.size() == 1 && recovering_pool.available() == 1; }, 10s,
+                    20ms);
+                expect(recovered) << "the existing pool did not recover its missing slot";
+                if (!recovered) {
+                    co_return false;
+                }
+
+                auto result = co_await recovering_pool.execute("SELECT 1", no_params);
+                expect(result.has_value()) << (result ? "" : result.error().message);
+                co_return result.has_value();
+            }());
+        }();
+
+        // run_on() exhausted the context before the pool destructor dispatched
+        // shutdown. Drain that dispatch so every pool-owned connection closes
+        // before the database is removed.
+        ctx.restart();
+        ctx.run();
+        auto cleaned = admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)");
+        expect(cleaned.has_value()) << (cleaned ? "" : cleaned.error().message);
+        expect(ran);
+    };
 
     "acquire hands out a working connection and takes it back"_test = [&url] {
         asio::io_context ctx;
@@ -560,8 +703,7 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
                 expect(!lease->is_alive()) << "the connection survived its own backend being terminated";
             }
 
-            const bool revived = co_await atlas_test::wait_until(
-                [&db] { return db.available() == 1; }, 5s, 10ms);
+            const bool revived = co_await atlas_test::wait_until([&db] { return db.available() == 1; }, 5s, 10ms);
             expect(revived) << "the pool did not publish a replacement connection";
             if (!revived) {
                 co_return false;

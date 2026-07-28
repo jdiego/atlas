@@ -1,6 +1,7 @@
 #include "atlas/async/pool.hpp"
 #include "async/detail/acquire_waiter_queue.hpp"
 #include "async/detail/pool_test_access.hpp"
+#include "async/detail/reconnect_backoff.hpp"
 #include "atlas/async/transaction.hpp"
 
 #include <boost/asio/co_spawn.hpp>
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <memory>
 #include <optional>
 #include <string>
@@ -69,9 +71,12 @@ struct pool_state : std::enable_shared_from_this<pool_state> {
     std::vector<async_connection> connections;
     std::vector<async_connection *> free;
     waiter_queue<std::shared_ptr<acquire_waiter>> waiters;
-    std::size_t retired = 0; // slots that could not be reconnected
+    std::size_t unavailable = 0; // existing slots with one recovery loop
+    std::vector<std::shared_ptr<asio::steady_timer>> recovery_timers;
+    std::optional<pg::error> last_connect_error;
     bool shutting_down = false;
     bool initialised = false; // initialise() has run to completion
+    bool initial_failure_pending = false;
 
     // Mirror of the two vectors above, for size() and available(). Those are
     // callable from any thread, and reading a vector's size while the strand
@@ -82,22 +87,22 @@ struct pool_state : std::enable_shared_from_this<pool_state> {
     [[nodiscard]] asio::awaitable<std::expected<async_connection *, pg::error>> acquire_slot();
     asio::awaitable<void> initialise();
     asio::awaitable<void> revive(async_connection *slot);
+    asio::awaitable<void> recover_missing_slot();
+    [[nodiscard]] asio::awaitable<std::expected<async_connection, pg::error>> connect_cycle();
+    [[nodiscard]] asio::awaitable<bool> wait_before_reconnect(std::chrono::milliseconds delay);
 
     void hand_off(async_connection *conn);
-    void wake_all_waiters();
+    void fail_all_waiters(const pg::error &failure);
     void release(async_connection *conn);
     void shutdown();
     void publish_counts();
-
-    // True once initialisation has run and nothing usable came out of it.
-    [[nodiscard]] bool exhausted() const noexcept {
-        return connections.size() == retired;
-    }
 };
 
 // Republishes the vector sizes for the lock-free observers. Strand only.
 void pool_state::publish_counts() {
-    live_count.store(connections.size() - retired, std::memory_order_relaxed);
+    assert(unavailable <= connections.size());
+    const auto usable = unavailable <= connections.size() ? connections.size() - unavailable : 0;
+    live_count.store(usable, std::memory_order_relaxed);
     free_count.store(free.size(), std::memory_order_relaxed);
 }
 
@@ -112,18 +117,19 @@ asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquir
         co_return std::unexpected(pg::error{"pool has no usable connections", pg::errc::connection_failure});
     }
 
-    // Initialisation runs once. If it finished without opening anything, or if
-    // every slot has since been retired, no release will ever come and waiting
-    // out the timeout would only delay the same failure.
-    if (initialised && exhausted()) {
-        co_return std::unexpected(pg::error{"pool has no usable connections", pg::errc::connection_failure});
-    }
-
     if (!free.empty()) {
         auto *conn = free.back();
         free.pop_back();
         publish_counts();
         co_return conn;
+    }
+
+    // initialise() is spawned by the constructor and may finish before the
+    // caller's first acquire reaches the strand. Preserve one notification in
+    // that scheduling case; once observed, later callers wait for recovery.
+    if (initial_failure_pending && last_connect_error) {
+        initial_failure_pending = false;
+        co_return std::unexpected(*last_connect_error);
     }
 
     auto waiter = std::make_shared<acquire_waiter>(executor_type{strand});
@@ -163,12 +169,13 @@ void pool_state::hand_off(async_connection *conn) {
     publish_counts();
 }
 
-// Signals every waiter with a terminal failure instead of blocking until its
-// own timeout.
-void pool_state::wake_all_waiters() {
+// Signals every current waiter with the supplied terminal failure. Recovery
+// can continue afterwards; only callers queued during the failed initial pass
+// receive that pass's connection error.
+void pool_state::fail_all_waiters(const pg::error &failure) {
     while (!waiters.empty()) {
         auto waiter = waiters.pop_front();
-        waiter->failure.emplace("pool has no usable connections", pg::errc::connection_failure);
+        waiter->failure = failure;
         waiter->handled = true;
         waiter->timer.cancel();
     }
@@ -202,57 +209,143 @@ void pool_state::release(async_connection *conn) {
         }
 
         conn->invalidate();
+        ++self->unavailable;
+        self->publish_counts();
         asio::co_spawn(
             self->strand, [self, conn]() -> asio::awaitable<void> { co_await self->revive(conn); }, asio::detached);
     });
+}
+
+// Makes one bounded batch of connection attempts. Recovery loops call this
+// repeatedly with a cancellable delay between batches.
+asio::awaitable<std::expected<async_connection, pg::error>> pool_state::connect_cycle() {
+    const std::size_t attempts = std::max<std::size_t>(cfg.max_retries, 1);
+    pg::error last{"pool connection failed", pg::errc::connection_failure};
+
+    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
+        if (shutting_down) {
+            co_return std::unexpected(std::move(last));
+        }
+
+        auto fresh = co_await async_connection::connect(ex, *connstr, cfg.cleanup_budget);
+        if (fresh) {
+            co_return std::move(*fresh);
+        }
+        last = std::move(fresh.error());
+    }
+
+    co_return std::unexpected(std::move(last));
+}
+
+// Registers the exact timer shutdown() must cancel. Both insertion and removal
+// run on the strand, so clearing the registry during shutdown cannot race a
+// recovering coroutine.
+asio::awaitable<bool> pool_state::wait_before_reconnect(std::chrono::milliseconds delay) {
+    if (shutting_down) {
+        co_return false;
+    }
+
+    auto timer = std::make_shared<asio::steady_timer>(executor_type{strand});
+    timer->expires_after(delay);
+    recovery_timers.push_back(timer);
+
+    boost::system::error_code ec;
+    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, ec));
+    std::erase(recovery_timers, timer);
+
+    // Cancellation is the shutdown signal. Any other timer error is terminal
+    // for this loop as well, avoiding an unbounded retry spin.
+    co_return !shutting_down && !ec;
 }
 
 // Reconnects a dead slot in place. Leases hand out pointers into `connections`,
 // so the slot is reused rather than replaced — move assignment keeps the
 // address stable for anyone still holding it.
 asio::awaitable<void> pool_state::revive(async_connection *slot) {
-    const std::size_t attempts = std::max<std::size_t>(cfg.max_retries, 1);
+    auto delay = cfg.reconnect_initial_delay;
 
-    for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
+    while (!shutting_down) {
+        auto fresh = co_await connect_cycle();
         if (shutting_down) {
             co_return;
         }
 
-        auto fresh = co_await async_connection::connect(ex, *connstr, cfg.cleanup_budget);
         if (fresh) {
             *slot = std::move(*fresh);
+            assert(unavailable > 0);
+            if (unavailable > 0) {
+                --unavailable;
+            }
+            publish_counts();
             hand_off(slot);
             co_return;
         }
+
+        last_connect_error = std::move(fresh.error());
+        if (!(co_await wait_before_reconnect(delay))) {
+            co_return;
+        }
+        delay = detail::next_reconnect_delay(delay, cfg.reconnect_max_delay);
     }
+}
 
-    // Retire the slot: the pool runs at reduced capacity rather than circulating
-    // a connection that cannot serve queries.
-    ++retired;
-    publish_counts();
+// Recovers one slot that could not be created during the initial pass. Each
+// failed initial slot starts exactly one instance of this coroutine.
+asio::awaitable<void> pool_state::recover_missing_slot() {
+    auto delay = cfg.reconnect_initial_delay;
 
-    if (exhausted()) {
-        wake_all_waiters();
+    while (!shutting_down) {
+        auto fresh = co_await connect_cycle();
+        if (shutting_down) {
+            co_return;
+        }
+
+        if (fresh) {
+            // The constructor reserved max_size, and exactly one coroutine
+            // exists per missing slot, so this push cannot reallocate or exceed
+            // the configured capacity.
+            assert(connections.size() < cfg.max_size);
+            connections.push_back(std::move(*fresh));
+            initial_failure_pending = false;
+            publish_counts();
+            hand_off(&connections.back());
+            co_return;
+        }
+
+        last_connect_error = std::move(fresh.error());
+        if (!(co_await wait_before_reconnect(delay))) {
+            co_return;
+        }
+        delay = detail::next_reconnect_delay(delay, cfg.reconnect_max_delay);
     }
 }
 
 void pool_state::shutdown() {
+    if (shutting_down) {
+        return;
+    }
+
     shutting_down = true;
-    wake_all_waiters();
+    for (const auto &timer : recovery_timers) {
+        static_cast<void>(timer->cancel());
+    }
+    recovery_timers.clear();
+    fail_all_waiters(pg::error{"pool has no usable connections", pg::errc::connection_failure});
     free.clear();
     publish_counts();
     // `connections` is deliberately left alone: detached work may still hold a
     // reference to this state, and the connections die with it.
 }
 
-// Fills the pool sequentially. A partially filled pool is still usable, so a
-// failed connect is skipped rather than aborting the whole initialisation.
+// Fills the pool sequentially. Failed slots are recorded and each receives one
+// recovery coroutine after the initial pass has notified its waiters.
 asio::awaitable<void> pool_state::initialise() {
     if (!connstr) {
         initialised = true;
         co_return;
     }
 
+    std::size_t missing = 0;
     for (std::size_t i = 0; i < cfg.max_size; ++i) {
         if (shutting_down) {
             co_return;
@@ -260,6 +353,8 @@ asio::awaitable<void> pool_state::initialise() {
 
         auto res = co_await async_connection::connect(ex, *connstr, cfg.cleanup_budget);
         if (!res) {
+            last_connect_error = std::move(res.error());
+            ++missing;
             continue;
         }
 
@@ -270,8 +365,15 @@ asio::awaitable<void> pool_state::initialise() {
 
     initialised = true;
 
-    if (exhausted()) {
-        wake_all_waiters();
+    if (connections.empty() && last_connect_error) {
+        initial_failure_pending = waiters.empty();
+        fail_all_waiters(*last_connect_error);
+    }
+
+    for (std::size_t i = 0; i < missing; ++i) {
+        asio::co_spawn(
+            strand, [self = shared_from_this()]() -> asio::awaitable<void> { co_await self->recover_missing_slot(); },
+            asio::detached);
     }
 }
 

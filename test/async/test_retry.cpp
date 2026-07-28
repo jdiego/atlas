@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <expected>
 #include <limits>
+#include <memory>
 #include <span>
 #include <string>
 
@@ -66,7 +67,8 @@ ut::suite<"async/retry/unit"> retry_unit_suite = [] {
 
     "a pool that cannot connect is reported without running the operation"_test = [] {
         asio::io_context ctx;
-        atlas::pool db{ctx.get_executor(), config_for(atlas_test::unreachable_conninfo, 1, 5s)};
+        auto db =
+            std::make_unique<atlas::pool>(ctx.get_executor(), config_for(atlas_test::unreachable_conninfo, 1, 5s));
 
         int calls = 0;
         auto op = [&calls](atlas::pool_connection &) -> asio::awaitable<int_result> {
@@ -74,7 +76,11 @@ ut::suite<"async/retry/unit"> retry_unit_suite = [] {
             co_return 1;
         };
 
-        auto res = run_on(ctx, atlas::with_retry<int>(db, 3, op, 1ms, 5ms));
+        auto res = run_on(ctx, [&]() -> asio::awaitable<int_result> {
+            auto result = co_await atlas::with_retry<int>(*db, 3, op, 1ms, 5ms);
+            db.reset(); // perpetual recovery ends only when the pool shuts down
+            co_return result;
+        }());
 
         expect(!res.has_value());
         expect(res.error().code == errc::connection_failure);
