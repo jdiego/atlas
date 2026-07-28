@@ -155,6 +155,10 @@ asio::awaitable<std::expected<void, pg::error>> transaction::rollback() {
         co_return std::unexpected(result.error());
     }
 
+    if (result->command_tag() != "ROLLBACK") {
+        co_return std::unexpected(pg::error{"unexpected ROLLBACK command tag", pg::errc::invalid_state});
+    }
+
     finish();
     co_return std::expected<void, pg::error>{};
 }
