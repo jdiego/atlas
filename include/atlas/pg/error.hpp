@@ -18,6 +18,7 @@ enum class errc {
     query_canceled,
     undefined_table,
     syntax_error,
+    transaction_aborted,
 };
 
 [[nodiscard]] inline auto sqlstate_to_errc(std::string_view sqlstate) noexcept -> errc {
@@ -47,6 +48,9 @@ enum class errc {
     }
     if (sqlstate == "42601") {
         return errc::syntax_error;
+    }
+    if (sqlstate == "25P02") {
+        return errc::transaction_aborted;
     }
     return errc::unknown;
 }

@@ -218,6 +218,14 @@ auto result::error_message() const noexcept -> std::string_view {
     return std::string_view{message};
 }
 
+auto result::command_tag() const noexcept -> std::string_view {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
+        return {};
+    }
+    const char *tag = PQcmdStatus(impl_->handle.get());
+    return tag == nullptr ? std::string_view{} : std::string_view{tag};
+}
+
 auto result::column_type(std::size_t col) const -> std::expected<oid, error> {
     const auto checked_column = validate_column(col);
     if (!checked_column) {
