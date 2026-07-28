@@ -9,10 +9,15 @@
 #include "atlas/pg/connection.hpp"
 
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/system/system_error.hpp>
 #include <boost/ut.hpp>
+#include <libpq-fe.h>
 
 #include <atomic>
 #include <chrono>
@@ -38,6 +43,40 @@ using atlas_test::run_on;
 using atlas_test::sleep_for;
 
 constexpr std::span<const char *const> no_params{};
+
+struct conninfo_options_deleter {
+    void operator()(PQconninfoOption *options) const noexcept {
+        if (options != nullptr) {
+            PQconninfoFree(options);
+        }
+    }
+};
+
+struct pq_memory_deleter {
+    void operator()(char *value) const noexcept {
+        if (value != nullptr) {
+            PQfreemem(value);
+        }
+    }
+};
+
+[[nodiscard]] auto parsed_option(std::string_view conninfo, std::string_view keyword) -> std::optional<std::string> {
+    const std::string copied{conninfo};
+    char *raw_error = nullptr;
+    std::unique_ptr<char, pq_memory_deleter> error;
+    std::unique_ptr<PQconninfoOption, conninfo_options_deleter> options{PQconninfoParse(copied.c_str(), &raw_error)};
+    error.reset(raw_error);
+    if (!options) {
+        return std::nullopt;
+    }
+
+    for (auto *option = options.get(); option->keyword != nullptr; ++option) {
+        if (keyword == option->keyword && option->val != nullptr) {
+            return std::string{option->val};
+        }
+    }
+    return std::nullopt;
+}
 
 [[nodiscard]] auto config_for(std::string url, std::size_t max_size, std::chrono::milliseconds timeout)
     -> atlas::pool_config {
@@ -68,6 +107,50 @@ constexpr std::span<const char *const> no_params{};
     }
     connection_info.append(" dbname=").append(database);
     return connection_info;
+}
+
+[[nodiscard]] auto recovery_database_name(std::string_view suffix) -> std::string {
+    return "atlas_recovery_" + std::to_string(::getpid()) + "_" + std::string{suffix};
+}
+
+[[nodiscard]] auto quote_identifier(std::string_view identifier) -> std::string {
+    return "\"" + std::string{identifier} + "\"";
+}
+
+struct canceled_acquire_outcome {
+    bool completed = false;
+    bool operation_aborted = false;
+    std::exception_ptr failure;
+};
+
+[[nodiscard]] auto cancel_on_waiter_enqueue(asio::io_context &ctx, atlas::pool &db) -> canceled_acquire_outcome {
+    boost::asio::cancellation_signal signal;
+    canceled_acquire_outcome outcome;
+    ctx.restart();
+    static_cast<void>(run_on(ctx, [&]() -> asio::awaitable<bool> {
+        co_await atlas::detail::pool_test_access::set_waiter_enqueued_hook(
+            db, [&signal] { signal.emit(asio::cancellation_type::all); });
+        co_return true;
+    }()));
+
+    auto pending_acquire = [&db]() -> asio::awaitable<void> { static_cast<void>(co_await db.acquire()); };
+    asio::co_spawn(ctx, pending_acquire(),
+                   asio::bind_cancellation_slot(signal.slot(), [&outcome](std::exception_ptr failure) {
+                       outcome.failure = failure;
+                       if (failure != nullptr) {
+                           try {
+                               std::rethrow_exception(failure);
+                           } catch (const boost::system::system_error &error) {
+                               outcome.operation_aborted = error.code() == asio::error::operation_aborted;
+                           } catch (...) {
+                           }
+                       }
+                       outcome.completed = true;
+                   }));
+
+    ctx.restart();
+    ctx.run();
+    return outcome;
 }
 
 } // namespace
@@ -108,16 +191,74 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
     "sslmode is appended to a URI without a query"_test = [] {
         const auto url = atlas::apply_ssl_mode("postgresql://localhost/atlas", atlas::ssl_mode::require);
         expect(url.has_value() >> fatal);
-        expect(*url == "postgresql://localhost/atlas?sslmode=require");
-        expect(has_one_sslmode_option(*url));
+        expect(parsed_option(*url, "sslmode") == std::optional<std::string>{"require"});
     };
 
     "sslmode is appended after an unrelated URI query"_test = [] {
         const auto url =
             atlas::apply_ssl_mode("postgresql://localhost/atlas?application_name=atlas", atlas::ssl_mode::disable);
         expect(url.has_value() >> fatal);
-        expect(*url == "postgresql://localhost/atlas?application_name=atlas&sslmode=disable");
-        expect(has_one_sslmode_option(*url));
+        expect(parsed_option(*url, "application_name") == std::optional<std::string>{"atlas"});
+        expect(parsed_option(*url, "sslmode") == std::optional<std::string>{"disable"});
+    };
+
+    "a raw question mark in a URI password survives TLS injection"_test = [] {
+        const auto url = atlas::apply_ssl_mode("postgresql://alice:pa?ss@localhost/atlas", atlas::ssl_mode::require);
+        expect(url.has_value() >> fatal);
+        expect(parsed_option(*url, "user") == std::optional<std::string>{"alice"});
+        expect(parsed_option(*url, "password") == std::optional<std::string>{"pa?ss"});
+        expect(parsed_option(*url, "sslmode") == std::optional<std::string>{"require"});
+    };
+
+    "a trailing bare URI query marker survives TLS injection"_test = [] {
+        const auto url = atlas::apply_ssl_mode("postgresql://localhost/atlas?", atlas::ssl_mode::disable);
+        expect(url.has_value() >> fatal);
+        expect(parsed_option(*url, "dbname") == std::optional<std::string>{"atlas"});
+        expect(parsed_option(*url, "sslmode") == std::optional<std::string>{"disable"});
+    };
+
+    "canonical URI conversion escapes quotes and backslashes"_test = [] {
+        const auto url =
+            atlas::apply_ssl_mode("postgresql://alice:p%27a%5Css@localhost/atlas", atlas::ssl_mode::verify_full);
+        expect(url.has_value() >> fatal);
+        expect(url->find("password='p\\'a\\\\ss'") != std::string::npos)
+            << "the canonical keyword value was not escaped";
+        expect(parsed_option(*url, "password") == std::optional<std::string>{"p'a\\ss"});
+        expect(parsed_option(*url, "sslmode") == std::optional<std::string>{"verify-full"});
+    };
+
+    "only exact libpq sslmode values are accepted"_test = [] {
+        for (const std::string_view mode : {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}) {
+            const auto url =
+                atlas::apply_ssl_mode("host=localhost sslmode=" + std::string{mode}, atlas::ssl_mode::prefer);
+            expect(url.has_value()) << mode;
+            if (url) {
+                expect(parsed_option(*url, "sslmode") == std::optional<std::string>{mode});
+            }
+        }
+
+        for (const std::string_view mode : {"", "Require", "verify_ca", "invalid"}) {
+            const auto url =
+                atlas::apply_ssl_mode("host=localhost sslmode='" + std::string{mode} + "'", atlas::ssl_mode::prefer);
+            expect(!url.has_value()) << mode;
+            if (!url) {
+                expect(url.error().code == errc::invalid_argument);
+            }
+        }
+    };
+
+    "ports use numeric syntax and support multi-host lists"_test = [] {
+        const auto multi = atlas::apply_ssl_mode("host=one,two,three port=5432,,5434", atlas::ssl_mode::disable);
+        expect(multi.has_value());
+
+        for (const std::string_view port : {"54x2", "5432,other", "5432, 5433", "-1"}) {
+            const auto url =
+                atlas::apply_ssl_mode("host=localhost port='" + std::string{port} + "'", atlas::ssl_mode::prefer);
+            expect(!url.has_value()) << port;
+            if (!url) {
+                expect(url.error().code == errc::invalid_argument);
+            }
+        }
     };
 
     "an embedded NUL in conninfo is rejected"_test = [] {
@@ -167,6 +308,48 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
         expect(rejected);
     };
 
+    "invalid sslmode and port are cached without recovery"_test = [] {
+        for (const std::string_view invalid : {"host=localhost sslmode=invalid", "host=localhost port=not-a-port"}) {
+            asio::io_context ctx;
+            atlas::pool db{ctx.get_executor(), config_for(std::string{invalid}, 1, 5s)};
+
+            const bool rejected = run_on(ctx, [&]() -> asio::awaitable<bool> {
+                for (int request = 0; request < 2; ++request) {
+                    auto acquired = co_await db.acquire();
+                    expect(!acquired.has_value());
+                    if (acquired) {
+                        co_return false;
+                    }
+                    expect(acquired.error().code == errc::invalid_argument);
+                }
+
+                const auto snapshot = co_await atlas::detail::pool_test_access::recovery_snapshot(db);
+                expect(snapshot.connect_attempt_count == 0_ul);
+                expect(snapshot.missing_loop_count == 0_ul);
+                expect(snapshot.timer_count == 0_ul);
+                co_return true;
+            }());
+
+            expect(rejected);
+        }
+    };
+
+    "pending intrinsic cancellation erases a queued ticket"_test = [] {
+        asio::io_context pool_ctx;
+        atlas::pool db{pool_ctx.get_executor(), config_for("host=localhost", 0, 100ms)};
+
+        const auto outcome = cancel_on_waiter_enqueue(pool_ctx, db);
+        expect(outcome.completed);
+        expect(outcome.failure != nullptr);
+        expect(outcome.operation_aborted);
+
+        pool_ctx.restart();
+        const auto queued = run_on(pool_ctx, [&]() -> asio::awaitable<std::size_t> {
+            co_return co_await atlas::detail::pool_test_access::waiter_count(db);
+        }());
+        expect(queued == 0_ul) << "intrinsic cancellation orphaned a queued acquire";
+    };
+
     "an unreachable server yields a failure, not a hang"_test = [] {
         asio::io_context ctx;
         auto db =
@@ -207,7 +390,7 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
     "destroying the pool cancels recovery backoff and wakes a later acquire"_test = [] {
         asio::io_context ctx;
         auto cfg = config_for(atlas_test::unreachable_conninfo, 1, 10s);
-        cfg.max_retries = 1;
+        cfg.max_retries = 3;
         cfg.reconnect_initial_delay = 5s;
         cfg.reconnect_max_delay = 5s;
         auto db = std::make_unique<atlas::pool>(ctx.get_executor(), cfg);
@@ -223,39 +406,54 @@ ut::suite<"async/pool/unit"> pool_unit_suite = [] {
             }
             expect(initial.error().code == errc::connection_failure);
 
-            // Let the missing slot enter its five-second recovery backoff, then
-            // prove a later caller waits for that recovery instead of receiving
-            // the initial pass's terminal notification.
-            co_await sleep_for(50ms);
-            bool finished = false;
-            std::optional<errc> failure;
-            auto later_acquire = [&]() -> asio::awaitable<void> {
-                auto result = co_await db->acquire();
-                if (!result) {
-                    failure = result.error().code;
+            // One initial attempt plus one three-attempt recovery cycle must
+            // produce exactly one registered backoff timer for this slot.
+            std::optional<atlas::detail::pool_recovery_snapshot> snapshot;
+            const auto snapshot_deadline = std::chrono::steady_clock::now() + 1s;
+            while (std::chrono::steady_clock::now() < snapshot_deadline) {
+                auto current = co_await atlas::detail::pool_test_access::recovery_snapshot(*db);
+                if (current.timer_count == 1) {
+                    snapshot = current;
+                    break;
                 }
-                finished = true;
-            };
-            asio::co_spawn(co_await asio::this_coro::executor, later_acquire(), asio::detached);
+                co_await sleep_for(5ms);
+            }
+            expect(snapshot.has_value()) << "the missing slot never entered recovery backoff";
+            if (snapshot) {
+                expect(snapshot->timer_count == 1_ul) << "one missing slot created duplicate recovery loops";
+                expect(snapshot->missing_loop_count == 1_ul) << "one missing slot spawned duplicate recovery loops";
+                expect(snapshot->connect_attempt_count == 4_ul) << "the recovery cycle did not honor max_retries=3";
+            }
 
-            co_await sleep_for(20ms);
-            const auto queued = co_await atlas::detail::pool_test_access::waiter_count(*db);
-            expect(queued == 1_ul) << "a later acquire did not wait for background recovery";
-            expect(!finished) << "the later acquire failed before pool shutdown";
-            const bool was_waiting = queued == 1 && !finished;
+            // Await directly from this frame. The timer callback resets the
+            // pool while acquire() is suspended, so no detached coroutine can
+            // retain references into a completed parent frame.
+            asio::steady_timer shutdown_timer{co_await asio::this_coro::executor};
+            shutdown_timer.expires_after(50ms);
+            auto shutdown_happened = std::make_shared<bool>(false);
+            shutdown_timer.async_wait([&db, shutdown_happened](const boost::system::error_code &ec) {
+                if (!ec) {
+                    *shutdown_happened = true;
+                    db.reset();
+                }
+            });
 
             const auto shutdown_at = std::chrono::steady_clock::now();
-            db.reset();
-            const bool woke = co_await atlas_test::wait_until([&finished] { return finished; }, 1s, 10ms);
+            auto later = co_await db->acquire();
             const auto shutdown_time = std::chrono::steady_clock::now() - shutdown_at;
 
-            expect(woke) << "shutdown left the acquire asleep in recovery backoff";
+            // Keep the negative path finite too: if acquire completes before
+            // the timer callback, destroy the perpetual-recovery pool here.
+            db.reset();
+
+            expect(*shutdown_happened) << "the later acquire completed before pool shutdown";
             expect(shutdown_time < 1s) << "shutdown waited for the five-second reconnect delay";
-            expect(failure.has_value());
-            if (failure) {
-                expect(*failure == errc::connection_failure);
+            expect(!later.has_value());
+            if (!later) {
+                expect(later.error().code == errc::connection_failure);
             }
-            co_return was_waiting && woke && failure == errc::connection_failure;
+            co_return snapshot.has_value() && *shutdown_happened && !later &&
+                later.error().code == errc::connection_failure;
         }());
         const auto run_time = std::chrono::steady_clock::now() - run_started;
 
@@ -276,8 +474,8 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
     }
 
     "pool recovers a database unavailable during initialisation"_test = [&url] {
-        const std::string database = "atlas_recovery_" + std::to_string(::getpid());
-        const std::string quoted_name = "\"" + database + "\"";
+        const std::string database = recovery_database_name("initial");
+        const std::string quoted_name = quote_identifier(database);
         auto admin = atlas::pg::connection::connect(*url);
         expect(admin.has_value() >> fatal);
         if (!admin) {
@@ -291,48 +489,255 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         }
 
         asio::io_context ctx;
-        auto cfg = config_for(with_database(*url, database), 1, 5s);
+        auto cfg = config_for(with_database(*url, database), 3, 5s);
         cfg.max_retries = 1;
-        cfg.reconnect_initial_delay = 20ms;
-        cfg.reconnect_max_delay = 100ms;
+        cfg.reconnect_initial_delay = 5s;
+        cfg.reconnect_max_delay = 5s;
+        auto recovering_pool = std::make_unique<atlas::pool>(ctx.get_executor(), cfg);
 
-        const bool ran = [&] {
-            atlas::pool recovering_pool{ctx.get_executor(), cfg};
-            return run_on(ctx, [&]() -> asio::awaitable<bool> {
-                // Whether queued during initialisation or scheduled just after
-                // it, the first caller observes the zero-open pass's last error.
-                auto first = co_await recovering_pool.acquire();
-                expect(!first.has_value());
-                if (first) {
-                    co_return false;
-                }
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            bool succeeded = true;
+
+            // Whether queued during initialisation or scheduled just after it,
+            // the first caller observes the zero-open pass's last error.
+            auto first = co_await recovering_pool->acquire();
+            expect(!first.has_value());
+            if (first) {
+                succeeded = false;
+            } else {
                 expect(first.error().code == errc::connection_failure);
+            }
 
+            std::optional<atlas::detail::pool_recovery_snapshot> snapshot;
+            if (succeeded) {
+                const auto snapshot_deadline = std::chrono::steady_clock::now() + 1s;
+                while (std::chrono::steady_clock::now() < snapshot_deadline) {
+                    auto current = co_await atlas::detail::pool_test_access::recovery_snapshot(*recovering_pool);
+                    if (current.timer_count == 3) {
+                        snapshot = current;
+                        break;
+                    }
+                    co_await sleep_for(5ms);
+                }
+                expect(snapshot.has_value()) << "not every missing slot entered one recovery backoff";
+                if (snapshot) {
+                    expect(snapshot->timer_count == 3_ul) << "missing slots created duplicate recovery loops";
+                    expect(snapshot->missing_loop_count == 3_ul) << "unexpected number of missing-slot recovery loops";
+                    expect(snapshot->connect_attempt_count == 6_ul)
+                        << "unexpected connection attempts before the first backoff";
+                } else {
+                    succeeded = false;
+                }
+            }
+
+            if (succeeded) {
                 auto created = admin->exec("CREATE DATABASE " + quoted_name);
                 expect(created.has_value());
                 if (!created) {
-                    co_return false;
+                    succeeded = false;
                 }
+            }
 
+            if (succeeded) {
                 const bool recovered = co_await atlas_test::wait_until(
-                    [&recovering_pool] { return recovering_pool.size() == 1 && recovering_pool.available() == 1; }, 10s,
-                    20ms);
-                expect(recovered) << "the existing pool did not recover its missing slot";
+                    [&recovering_pool] { return recovering_pool->size() == 3 && recovering_pool->available() == 3; },
+                    10s, 20ms);
+                expect(recovered) << "the existing pool did not recover every missing slot";
                 if (!recovered) {
-                    co_return false;
+                    succeeded = false;
                 }
+            }
 
-                auto result = co_await recovering_pool.execute("SELECT 1", no_params);
+            if (succeeded) {
+                auto result = co_await recovering_pool->execute("SELECT 1", no_params);
                 expect(result.has_value()) << (result ? "" : result.error().message);
-                co_return result.has_value();
-            }());
-        }();
+                succeeded = result.has_value();
+            }
 
-        // run_on() exhausted the context before the pool destructor dispatched
-        // shutdown. Drain that dispatch so every pool-owned connection closes
-        // before the database is removed.
-        ctx.restart();
-        ctx.run();
+            // Recovery timers are perpetual on failure, so shutdown must happen
+            // on every branch before run_on() waits for executor exhaustion.
+            recovering_pool.reset();
+            co_return succeeded;
+        }());
+
+        auto cleaned = admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)");
+        expect(cleaned.has_value()) << (cleaned ? "" : cleaned.error().message);
+        expect(ran);
+    };
+
+    "an unavailable existing slot recovers after its database returns"_test = [&url] {
+        const std::string database = recovery_database_name("existing");
+        const std::string quoted_name = quote_identifier(database);
+        auto admin = atlas::pg::connection::connect(*url);
+        expect(admin.has_value() >> fatal);
+        if (!admin) {
+            return;
+        }
+
+        expect(admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)").has_value() >> fatal);
+        expect(admin->exec("CREATE DATABASE " + quoted_name).has_value() >> fatal);
+
+        asio::io_context ctx;
+        auto cfg = config_for(with_database(*url, database), 1, 5s);
+        cfg.max_retries = 1;
+        cfg.reconnect_initial_delay = 100ms;
+        cfg.reconnect_max_delay = 100ms;
+        auto recovering_pool = std::make_unique<atlas::pool>(ctx.get_executor(), cfg);
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            bool succeeded = true;
+            auto acquired = co_await recovering_pool->acquire();
+            expect(acquired.has_value());
+            std::optional<atlas::pool_connection> held;
+            if (acquired) {
+                held.emplace(std::move(*acquired));
+            } else {
+                succeeded = false;
+            }
+
+            if (succeeded) {
+                auto dropped = admin->exec("DROP DATABASE " + quoted_name + " WITH (FORCE)");
+                expect(dropped.has_value());
+                if (!dropped) {
+                    succeeded = false;
+                }
+            }
+
+            if (succeeded) {
+                auto failed = co_await held->execute("SELECT 1", no_params);
+                expect(!failed.has_value()) << "the force-dropped backend still served a query";
+                succeeded = !failed.has_value();
+            }
+            held.reset();
+
+            if (succeeded) {
+                const bool unavailable =
+                    co_await atlas_test::wait_until([&recovering_pool] { return recovering_pool->size() == 0; }, 1s);
+                expect(unavailable) << "the dead existing slot remained in the usable size";
+                succeeded = unavailable;
+            }
+
+            if (succeeded) {
+                std::optional<atlas::detail::pool_recovery_snapshot> snapshot;
+                const auto snapshot_deadline = std::chrono::steady_clock::now() + 1s;
+                while (std::chrono::steady_clock::now() < snapshot_deadline) {
+                    auto current = co_await atlas::detail::pool_test_access::recovery_snapshot(*recovering_pool);
+                    if (current.timer_count == 1) {
+                        snapshot = current;
+                        break;
+                    }
+                    co_await sleep_for(5ms);
+                }
+                expect(snapshot.has_value()) << "the existing slot did not retry while its database was absent";
+                succeeded = snapshot.has_value();
+            }
+
+            if (succeeded) {
+                auto created = admin->exec("CREATE DATABASE " + quoted_name);
+                expect(created.has_value());
+                if (!created) {
+                    succeeded = false;
+                }
+            }
+
+            if (succeeded) {
+                const bool recovered = co_await atlas_test::wait_until(
+                    [&recovering_pool] { return recovering_pool->size() == 1 && recovering_pool->available() == 1; },
+                    5s, 20ms);
+                expect(recovered) << "the unavailable existing slot was permanently retired";
+                succeeded = recovered;
+            }
+
+            if (succeeded) {
+                auto result = co_await recovering_pool->execute("SELECT 1", no_params);
+                expect(result.has_value()) << (result ? "" : result.error().message);
+                succeeded = result.has_value();
+            }
+
+            recovering_pool.reset();
+            co_return succeeded;
+        }());
+
+        auto cleaned = admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)");
+        expect(cleaned.has_value()) << (cleaned ? "" : cleaned.error().message);
+        expect(ran);
+    };
+
+    "a recovered missing slot is handed directly to its queued waiter"_test = [&url] {
+        const std::string database = recovery_database_name("waiter");
+        const std::string quoted_name = quote_identifier(database);
+        auto admin = atlas::pg::connection::connect(*url);
+        expect(admin.has_value() >> fatal);
+        if (!admin) {
+            return;
+        }
+        expect(admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)").has_value() >> fatal);
+
+        asio::io_context ctx;
+        auto cfg = config_for(with_database(*url, database), 1, 5s);
+        cfg.max_retries = 1;
+        cfg.reconnect_initial_delay = 100ms;
+        cfg.reconnect_max_delay = 100ms;
+        auto recovering_pool = std::make_unique<atlas::pool>(ctx.get_executor(), cfg);
+
+        struct create_outcome {
+            bool attempted = false;
+            bool succeeded = false;
+        };
+        auto creation = std::make_shared<create_outcome>();
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            bool succeeded = true;
+            auto first = co_await recovering_pool->acquire();
+            expect(!first.has_value());
+            if (first) {
+                succeeded = false;
+            }
+
+            if (succeeded) {
+                bool in_backoff = false;
+                const auto backoff_deadline = std::chrono::steady_clock::now() + 1s;
+                while (std::chrono::steady_clock::now() < backoff_deadline) {
+                    auto snapshot = co_await atlas::detail::pool_test_access::recovery_snapshot(*recovering_pool);
+                    if (snapshot.timer_count == 1) {
+                        in_backoff = true;
+                        break;
+                    }
+                    co_await sleep_for(5ms);
+                }
+                expect(in_backoff);
+                succeeded = in_backoff;
+            }
+
+            asio::steady_timer create_timer{co_await asio::this_coro::executor};
+            create_timer.expires_after(20ms);
+            auto *admin_connection = &*admin;
+            create_timer.async_wait([creation, admin_connection, quoted_name](const boost::system::error_code &ec) {
+                if (!ec) {
+                    creation->attempted = true;
+                    creation->succeeded = admin_connection->exec("CREATE DATABASE " + quoted_name).has_value();
+                }
+            });
+
+            auto recovered = co_await recovering_pool->acquire();
+            expect(creation->attempted);
+            expect(creation->succeeded);
+            expect(recovered.has_value()) << (recovered ? "" : recovered.error().message);
+            if (!recovered) {
+                succeeded = false;
+            } else {
+                expect(recovering_pool->size() == 1_ul);
+                expect(recovering_pool->available() == 0_ul)
+                    << "the recovered slot was parked instead of handed to the queued waiter";
+                auto result = co_await recovered->execute("SELECT 1", no_params);
+                expect(result.has_value()) << (result ? "" : result.error().message);
+                succeeded = succeeded && result.has_value() && creation->succeeded && recovering_pool->available() == 0;
+            }
+
+            recovering_pool.reset();
+            co_return succeeded;
+        }());
+
         auto cleaned = admin->exec("DROP DATABASE IF EXISTS " + quoted_name + " WITH (FORCE)");
         expect(cleaned.has_value()) << (cleaned ? "" : cleaned.error().message);
         expect(ran);
@@ -829,6 +1234,51 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         }());
 
         expect(ran);
+    };
+
+    "pending intrinsic cancellation removes its queued waiter"_test = [&url] {
+        asio::io_context pool_ctx;
+        atlas::pool db{pool_ctx.get_executor(), config_for(*url, 1, 100ms)};
+        std::optional<atlas::pool_connection> held;
+
+        const bool acquired_initially = run_on(pool_ctx, [&]() -> asio::awaitable<bool> {
+            auto acquired = co_await db.acquire();
+            expect(acquired.has_value());
+            if (!acquired) {
+                co_return false;
+            }
+            held.emplace(std::move(*acquired));
+            co_return true;
+        }());
+        expect(acquired_initially >> fatal);
+        if (!acquired_initially) {
+            return;
+        }
+
+        const auto outcome = cancel_on_waiter_enqueue(pool_ctx, db);
+        expect(outcome.completed);
+        expect(outcome.failure != nullptr);
+        expect(outcome.operation_aborted);
+
+        pool_ctx.restart();
+        const auto queued = run_on(pool_ctx, [&]() -> asio::awaitable<std::size_t> {
+            co_return co_await atlas::detail::pool_test_access::waiter_count(db);
+        }());
+        expect(queued == 0_ul) << "intrinsic cancellation orphaned a queued acquire";
+
+        held.reset();
+        pool_ctx.restart();
+        const bool usable = run_on(pool_ctx, [&]() -> asio::awaitable<bool> {
+            auto acquired = co_await db.acquire();
+            expect(acquired.has_value()) << (acquired ? "" : acquired.error().message);
+            if (!acquired) {
+                co_return false;
+            }
+            auto result = co_await acquired->execute("SELECT 1", no_params);
+            expect(result.has_value()) << (result ? "" : result.error().message);
+            co_return result.has_value();
+        }());
+        expect(usable);
     };
 
     "timer and handoff boundary never loses the pool slot"_test = [&url] {

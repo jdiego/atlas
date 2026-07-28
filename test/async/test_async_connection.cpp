@@ -79,6 +79,20 @@ ut::suite<"async/connection/unit"> async_connection_unit_suite = [] {
         expect(code.has_value());
     };
 
+    "an embedded NUL in async conninfo is rejected"_test = [] {
+        asio::io_context ctx;
+        std::string conninfo_with_nul{"host=127.0.0.1 port=1"};
+        conninfo_with_nul.push_back('\0');
+        conninfo_with_nul.append(" dbname=ignored");
+
+        const auto code = run_on(ctx, connect_failure(ctx, conninfo_with_nul));
+
+        expect(code.has_value());
+        if (code) {
+            expect(*code == errc::invalid_argument);
+        }
+    };
+
     "unsupported protocol transitions are not ordinary results"_test = [] {
         using atlas::detail::async_result_disposition;
         using atlas::detail::classify_async_result;
@@ -256,6 +270,40 @@ ut::suite<"async/connection/integration"> async_connection_integration_suite = [
                 expect(res->rows() == 1_ul);
             }
             co_return true;
+        }());
+
+        expect(ran);
+    };
+
+    "embedded NUL SQL is rejected without consuming the connection"_test = [&url] {
+        asio::io_context ctx;
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto conn = co_await atlas::async_connection::connect(ctx.get_executor(), *url);
+            if (!conn) {
+                expect(false) << conn.error().message;
+                co_return false;
+            }
+
+            std::string sql{"SELECT 1"};
+            sql.push_back('\0');
+            sql.append("; SELECT 2");
+
+            auto sent = conn->send_query(sql, no_params);
+            expect(!sent.has_value());
+            if (!sent) {
+                expect(sent.error().code == errc::invalid_argument);
+            }
+
+            auto executed = co_await conn->execute(sql, no_params);
+            expect(!executed.has_value());
+            if (!executed) {
+                expect(executed.error().code == errc::invalid_argument);
+            }
+
+            auto usable = co_await conn->execute("SELECT 1", no_params);
+            expect(usable.has_value()) << (usable ? "" : usable.error().message);
+            co_return !sent && !executed && usable.has_value();
         }());
 
         expect(ran);

@@ -28,8 +28,9 @@ struct pool_config {
     std::chrono::milliseconds reconnect_max_delay{5000};
 };
 
-// Validates a libpq connection string and appends sslmode=<value> when libpq's
-// parsed options do not already contain an explicit sslmode.
+// Validates conninfo syntax plus exact sslmode and numeric port-list values,
+// then applies sslmode=<value> when no explicit mode exists. Other libpq option
+// semantics remain connection-time validation.
 [[nodiscard]] std::expected<std::string, pg::error> apply_ssl_mode(std::string url, ssl_mode mode);
 
 } // namespace atlas

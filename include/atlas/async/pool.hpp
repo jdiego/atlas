@@ -91,7 +91,7 @@ public:
     [[nodiscard]] asio::awaitable<std::expected<pg::result, pg::error>> execute(std::string_view sql,
                                                                                 std::span<const char *const> params);
 
-    [[nodiscard]] std::size_t size() const noexcept;      // total connections
+    [[nodiscard]] std::size_t size() const noexcept;      // currently usable connections
     [[nodiscard]] std::size_t available() const noexcept; // free connections
 
 private:

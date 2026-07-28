@@ -153,6 +153,11 @@ void async_connection::cleanup() noexcept {
 // On every exit path libpq owns the socket and the descriptor has let go of it.
 pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::string_view connstr,
                                                          std::chrono::milliseconds cleanup_budget) {
+    if (connstr.find('\0') != std::string_view::npos) {
+        co_return std::unexpected(
+            pg::error{"connection string contains an embedded NUL byte", pg::errc::invalid_argument});
+    }
+
     // string_view carries no NUL-terminator guarantee; libpq needs a C string.
     const std::string connstr_str{connstr};
 
@@ -206,6 +211,10 @@ pg_awaitable<async_connection> async_connection::connect(executor_type ex, std::
 // Enqueues a parameterised query. The query may still be sitting in libpq's
 // output buffer when this returns; receive() flushes before it waits for input.
 pg_expected<void> async_connection::send_query(std::string_view sql, std::span<const char *const> params) {
+    if (sql.find('\0') != std::string_view::npos) {
+        return std::unexpected(pg::error{"SQL command contains an embedded NUL byte", pg::errc::invalid_argument});
+    }
+
     if (pg_conn_ == nullptr) {
         return std::unexpected(pg::error{"send_query on moved-from connection", pg::errc::invalid_state});
     }

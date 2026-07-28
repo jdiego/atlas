@@ -304,6 +304,36 @@ ut::suite<"async/transaction/integration"> transaction_suite = [] {
         expect(ran);
     };
 
+    "transaction execute forwards embedded NUL rejection"_test = [&url] {
+        asio::io_context ctx;
+        atlas::pool db{ctx.get_executor(), config_for(*url, 1)};
+
+        const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            auto tx = co_await db.begin();
+            expect(tx.has_value() >> fatal);
+            if (!tx) {
+                co_return false;
+            }
+
+            std::string sql{"SELECT 1"};
+            sql.push_back('\0');
+            sql.append("; SELECT 2");
+            auto rejected = co_await tx->execute(sql, no_params);
+            expect(!rejected.has_value());
+            if (!rejected) {
+                expect(rejected.error().code == errc::invalid_argument);
+            }
+
+            auto usable = co_await tx->execute("SELECT 1", no_params);
+            expect(usable.has_value()) << (usable ? "" : usable.error().message);
+            auto rolled_back = co_await tx->rollback();
+            expect(rolled_back.has_value());
+            co_return !rejected && usable.has_value() && rolled_back.has_value();
+        }());
+
+        expect(ran);
+    };
+
     "rollback_to undoes only the work after the savepoint"_test = [&url] {
         asio::io_context ctx;
         atlas::pool db{ctx.get_executor(), config_for(*url, 2)};
