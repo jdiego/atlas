@@ -35,6 +35,11 @@ default of one. This contract validates packaging rather than build throughput,
 so deterministic resource usage is more valuable than maximum parallelism. A
 caller may explicitly select a higher value when appropriate.
 
+The nested configure must also use the same C++ compiler selected by the parent
+build. This matters when CI explicitly selects a non-default toolchain: without
+propagation, the package contract silently falls back to the platform compiler
+and no longer tests the configuration that the workflow requested.
+
 The test will retain its existing 180-second outer timeout.
 
 ### Pool recovery
@@ -86,6 +91,7 @@ coverage.
 
 - no maintainer warning option is exported to installed consumers;
 - the installed-consumer contract builds without compiler resource failures;
+- the installed-consumer contract uses the parent's exact C++ compiler;
 - pool recovery completes deterministically without raising the global test
   budget;
 - all four GitHub Actions workflows pass.

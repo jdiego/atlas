@@ -522,3 +522,156 @@ gh pr view 6 --json url,title,body,headRefName,baseRefName
 
 Expected: clean `feat/async-engine`, English PR title/body, base `main`, and the
 CI-fix commits present.
+
+---
+
+### Task 7: Preserve the Parent Compiler in the Installed Consumer
+
+**Files:**
+- Modify: `test/CMakeLists.txt`
+- Modify: `test/cmake/run_installed_consumer.cmake`
+
+**Interfaces:**
+- Consumes: the parent configure's absolute `CMAKE_CXX_COMPILER`.
+- Produces: a nested installed-consumer configure that uses and verifies the same compiler executable.
+
+- [ ] **Step 1: Add the failing compiler-identity assertion**
+
+Pass the selected parent compiler to the package-contract script from
+`test/CMakeLists.txt`:
+
+```cmake
+"-DATLAS_PARENT_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+```
+
+After the nested configure succeeds, read its cache and require the same
+canonical compiler path:
+
+```cmake
+file(
+    STRINGS "${ATLAS_CONSUMER_BINARY_DIR}/CMakeCache.txt"
+    consumer_cxx_compiler_entry
+    REGEX "^CMAKE_CXX_COMPILER:FILEPATH="
+)
+string(
+    REGEX REPLACE "^CMAKE_CXX_COMPILER:FILEPATH=" ""
+    consumer_cxx_compiler "${consumer_cxx_compiler_entry}"
+)
+file(REAL_PATH "${ATLAS_PARENT_CXX_COMPILER}" parent_cxx_compiler)
+file(REAL_PATH "${consumer_cxx_compiler}" resolved_consumer_cxx_compiler)
+if(NOT resolved_consumer_cxx_compiler STREQUAL parent_cxx_compiler)
+    message(FATAL_ERROR
+        "Installed consumer changed the C++ compiler:"
+        " expected '${parent_cxx_compiler}', got '${resolved_consumer_cxx_compiler}'"
+    )
+endif()
+```
+
+- [ ] **Step 2: Verify RED with a non-default compiler**
+
+On macOS with Homebrew LLVM:
+
+```bash
+cmake -S . -B build/compiler-contract \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
+  -DATLAS_ENABLE_TESTING=ON
+cmake --build build/compiler-contract
+ctest --test-dir build/compiler-contract \
+  -R '^atlas_installed_consumer_contract$' \
+  --output-on-failure
+```
+
+Expected before compiler propagation: FAIL with
+`Installed consumer changed the C++ compiler`, because the nested configure
+selects the platform default instead of Homebrew LLVM. The failed macOS Actions
+run `30360115448`, where outer Homebrew LLVM became nested Apple Clang 17, is
+also authoritative RED evidence.
+
+- [ ] **Step 3: Propagate the compiler into the nested configure**
+
+Add this exact argument to the nested CMake configure in
+`test/cmake/run_installed_consumer.cmake`:
+
+```cmake
+"-DCMAKE_CXX_COMPILER=${ATLAS_PARENT_CXX_COMPILER}"
+```
+
+- [ ] **Step 4: Verify GREEN with both toolchains**
+
+Run:
+
+```bash
+cmake --preset dev
+cmake --build --preset dev
+ctest --test-dir build/dev \
+  -R '^atlas_installed_consumer_contract$' \
+  --output-on-failure
+
+cmake --build build/compiler-contract
+ctest --test-dir build/compiler-contract \
+  -R '^atlas_installed_consumer_contract$' \
+  --output-on-failure
+```
+
+Expected: both installed-consumer contracts pass and each cache records the
+parent's exact compiler.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add test/CMakeLists.txt test/cmake/run_installed_consumer.cmake \
+  docs/superpowers/specs/2026-07-28-ci-stability-design.md \
+  docs/superpowers/plans/2026-07-28-ci-stability.md
+git commit -m "fix: preserve installed consumer compiler"
+```
+
+---
+
+### Task 8: Republish and Require Four Passing Workflows
+
+**Files:**
+- No source changes expected.
+
+**Interfaces:**
+- Consumes: the Task 7 compiler-propagation commit.
+- Produces: a synchronized PR #6 with macOS, Ubuntu, Standalone, and Install all passing.
+
+- [ ] **Step 1: Push the follow-up commit**
+
+```bash
+git push origin feat/async-engine
+```
+
+Expected: the remote head advances from `1e1d6fc` to the Task 7 commit.
+
+- [ ] **Step 2: Watch every check to a terminal state**
+
+```bash
+gh pr checks 6 --watch --interval 10
+```
+
+Expected: macOS, Ubuntu, Standalone, and Install all pass.
+
+- [ ] **Step 3: Confirm the compiler used by macOS**
+
+Inspect the completed macOS log:
+
+```bash
+gh run view "$(gh run list --workflow macOS --branch feat/async-engine --limit 1 --json databaseId --jq '.[0].databaseId')" --log
+```
+
+Expected: the installed-consumer configure identifies the Homebrew LLVM
+compiler selected by the outer workflow; no Apple Clang 17 crash appears.
+
+- [ ] **Step 4: Confirm final repository and PR state**
+
+```bash
+git status --short --branch
+git rev-parse HEAD
+git rev-parse origin/feat/async-engine
+gh pr view 6 --json url,title,body,headRefName,baseRefName,statusCheckRollup
+```
+
+Expected: clean synchronized branch, English PR metadata, base `main`, head
+`feat/async-engine`, and four successful checks.

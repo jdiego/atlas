@@ -49,6 +49,7 @@ execute_process(
         -G "${ATLAS_GENERATOR}"
         "-DCMAKE_BUILD_TYPE=${ATLAS_BUILD_CONFIG}"
         "-DCMAKE_CXX_FLAGS=${ATLAS_PARENT_CXX_FLAGS}"
+        "-DCMAKE_CXX_COMPILER=${ATLAS_PARENT_CXX_COMPILER}"
         "-DCMAKE_PREFIX_PATH=${ATLAS_PACKAGE_STAGE}"
         -DTEST_USE_INSTALLED_VERSION=ON
     RESULT_VARIABLE configure_result
@@ -74,6 +75,24 @@ if(NOT consumer_cxx_flags STREQUAL ATLAS_PARENT_CXX_FLAGS)
     message(FATAL_ERROR
         "Installed consumer lost parent C++ flags:"
         " expected '${ATLAS_PARENT_CXX_FLAGS}', got '${consumer_cxx_flags}'"
+    )
+endif()
+
+file(
+    STRINGS "${ATLAS_CONSUMER_BINARY_DIR}/CMakeCache.txt"
+    consumer_cxx_compiler_entry
+    REGEX "^CMAKE_CXX_COMPILER:(FILEPATH|STRING)="
+)
+string(
+    REGEX REPLACE "^CMAKE_CXX_COMPILER:(FILEPATH|STRING)=" ""
+    consumer_cxx_compiler "${consumer_cxx_compiler_entry}"
+)
+file(REAL_PATH "${ATLAS_PARENT_CXX_COMPILER}" parent_cxx_compiler)
+file(REAL_PATH "${consumer_cxx_compiler}" resolved_consumer_cxx_compiler)
+if(NOT resolved_consumer_cxx_compiler STREQUAL parent_cxx_compiler)
+    message(FATAL_ERROR
+        "Installed consumer changed the C++ compiler:"
+        " expected '${parent_cxx_compiler}', got '${resolved_consumer_cxx_compiler}'"
     )
 endif()
 
