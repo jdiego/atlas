@@ -37,7 +37,7 @@ find_dependency(Threads)
 find_dependency(PkgConfig)
 
 if(NOT TARGET PkgConfig::LIBPQ)
-  pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
+  pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET "libpq>=18")
 endif()
 
 if(TARGET PkgConfig::LIBPQ AND NOT TARGET PostgreSQL::PostgreSQL)

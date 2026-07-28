@@ -30,8 +30,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get install -y ca-certificates postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y libboost-all-dev libpq-dev pkg-config
-          sudo apt-get install -y libboost-all-dev
+          pkg-config --atleast-version=18 libpq
 
       - name: Build and install library
         run: |

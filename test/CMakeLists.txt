@@ -50,7 +50,7 @@ add_executable(${TEST_SUITE} ${TEST_SOURCES})
 
 get_target_property(ut_include_dirs Boost::ut INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(${TEST_SUITE} PRIVATE ${ut_SOURCE_DIR}/include ${CMAKE_CURRENT_LIST_DIR}/../src)
-target_link_libraries(${TEST_SUITE} PRIVATE Boost::ut ${MODULE_NAME}::${MODULE_NAME})
+target_link_libraries(${TEST_SUITE} PRIVATE Boost::ut ${MODULE_NAME}::${MODULE_NAME} PkgConfig::LIBPQ)
 
 
 target_compile_features(${TEST_SUITE} PRIVATE cxx_std_23)
@@ -82,6 +82,13 @@ enable_testing()
 # For other testing frameworks add the tests target instead:
 # add_test(NAME ${PROJECT_NAME} COMMAND ${PROJECT_NAME})
 add_test(NAME ${TEST_SUITE} COMMAND ${TEST_SUITE})
+add_test(
+    NAME atlas_package_config_libpq_floor
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DATLAS_PACKAGE_CONFIG=${CMAKE_BINARY_DIR}/${MODULE_NAME}Config.cmake
+        -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_libpq_floor.cmake
+)
 
 # ######################################################################################################################
 # Setup code coverage if enabled
