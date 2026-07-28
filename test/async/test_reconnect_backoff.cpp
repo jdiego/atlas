@@ -19,13 +19,16 @@ using namespace std::chrono_literals;
 
 namespace {
 
-[[nodiscard]] auto acquire_rejects(atlas::pool_config cfg) -> bool {
+[[nodiscard]] auto acquire_fails_with(atlas::pool_config cfg, atlas::pg::errc expected) -> bool {
     asio::io_context ctx;
     atlas::pool db{ctx.get_executor(), std::move(cfg)};
 
     return atlas_test::run_on(ctx, [&]() -> asio::awaitable<bool> {
         const auto acquired = co_await db.acquire();
-        co_return !acquired && acquired.error().code == atlas::pg::errc::invalid_argument;
+        if (acquired) {
+            co_return false;
+        }
+        co_return acquired.error().code == expected;
     }());
 }
 
@@ -59,19 +62,42 @@ ut::suite<"async/reconnect_backoff/unit"> reconnect_backoff_unit_suite = [] {
     "negative initial reconnect delay is terminal"_test = [] {
         atlas::pool_config cfg;
         cfg.reconnect_initial_delay = -1ms;
-        expect(acquire_rejects(std::move(cfg)));
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::invalid_argument));
     };
 
     "negative maximum reconnect delay is terminal"_test = [] {
         atlas::pool_config cfg;
         cfg.reconnect_max_delay = -1ms;
-        expect(acquire_rejects(std::move(cfg)));
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::invalid_argument));
     };
 
     "maximum reconnect delay below initial delay is terminal"_test = [] {
         atlas::pool_config cfg;
         cfg.reconnect_initial_delay = 2ms;
         cfg.reconnect_max_delay = 1ms;
-        expect(acquire_rejects(std::move(cfg)));
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::invalid_argument));
+    };
+
+    "zero initial reconnect delay is accepted"_test = [] {
+        atlas::pool_config cfg;
+        cfg.url = atlas_test::unreachable_conninfo;
+        cfg.reconnect_initial_delay = 0ms;
+        cfg.reconnect_max_delay = 5s;
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::connection_failure));
+    };
+
+    "zero reconnect delay range is accepted"_test = [] {
+        atlas::pool_config cfg;
+        cfg.url = atlas_test::unreachable_conninfo;
+        cfg.reconnect_initial_delay = 0ms;
+        cfg.reconnect_max_delay = 0ms;
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::connection_failure));
+    };
+
+    "zero maximum below positive initial delay is terminal"_test = [] {
+        atlas::pool_config cfg;
+        cfg.reconnect_initial_delay = 1ms;
+        cfg.reconnect_max_delay = 0ms;
+        expect(acquire_fails_with(std::move(cfg), atlas::pg::errc::invalid_argument));
     };
 };
