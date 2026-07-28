@@ -38,11 +38,22 @@ struct acquire_waiter {
     bool expired = false; // the timeout won and erased this waiter
 };
 
+[[nodiscard]] auto validated_connstr(const pool_config &config) -> std::expected<std::string, pg::error> {
+    if (config.reconnect_initial_delay.count() < 0 || config.reconnect_max_delay.count() < 0) {
+        return std::unexpected(pg::error{"reconnect delays must be non-negative", pg::errc::invalid_argument});
+    }
+    if (config.reconnect_max_delay < config.reconnect_initial_delay) {
+        return std::unexpected(
+            pg::error{"reconnect maximum delay must not be smaller than initial delay", pg::errc::invalid_argument});
+    }
+    return apply_ssl_mode(config.url, config.ssl);
+}
+
 } // namespace
 
 struct pool_state : std::enable_shared_from_this<pool_state> {
     pool_state(executor_type executor, pool_config config)
-        : ex{std::move(executor)}, strand{ex}, cfg{std::move(config)}, connstr{apply_ssl_mode(cfg.url, cfg.ssl)} {
+        : ex{std::move(executor)}, strand{ex}, cfg{std::move(config)}, connstr{validated_connstr(cfg)} {
         // Leases hand out raw pointers into `connections`; reserving up front
         // guarantees no reallocation can invalidate them later.
         connections.reserve(cfg.max_size);

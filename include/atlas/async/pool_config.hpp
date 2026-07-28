@@ -24,6 +24,8 @@ struct pool_config {
     ssl_mode ssl = ssl_mode::prefer;
     std::size_t max_retries = 3;
     std::chrono::milliseconds cleanup_budget = default_cleanup_budget;
+    std::chrono::milliseconds reconnect_initial_delay{100};
+    std::chrono::milliseconds reconnect_max_delay{5000};
 };
 
 // Validates a libpq connection string and appends sslmode=<value> when libpq's
