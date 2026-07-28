@@ -20,6 +20,7 @@ execute_process(
         -B "${ATLAS_CONSUMER_BINARY_DIR}"
         -G "${ATLAS_GENERATOR}"
         "-DCMAKE_BUILD_TYPE=${ATLAS_BUILD_CONFIG}"
+        "-DCMAKE_CXX_FLAGS=${ATLAS_PARENT_CXX_FLAGS}"
         "-DCMAKE_PREFIX_PATH=${ATLAS_PACKAGE_STAGE}"
         -DTEST_USE_INSTALLED_VERSION=ON
     RESULT_VARIABLE configure_result
@@ -29,6 +30,22 @@ execute_process(
 if(NOT configure_result EQUAL 0)
     message(FATAL_ERROR
         "Installed Atlas consumer configuration failed:\n${configure_output}\n${configure_error}"
+    )
+endif()
+
+file(
+    STRINGS "${ATLAS_CONSUMER_BINARY_DIR}/CMakeCache.txt"
+    consumer_cxx_flags_entry
+    REGEX "^CMAKE_CXX_FLAGS:STRING="
+)
+string(
+    REGEX REPLACE "^CMAKE_CXX_FLAGS:STRING=" ""
+    consumer_cxx_flags "${consumer_cxx_flags_entry}"
+)
+if(NOT consumer_cxx_flags STREQUAL ATLAS_PARENT_CXX_FLAGS)
+    message(FATAL_ERROR
+        "Installed consumer lost parent C++ flags:"
+        " expected '${ATLAS_PARENT_CXX_FLAGS}', got '${consumer_cxx_flags}'"
     )
 endif()
 

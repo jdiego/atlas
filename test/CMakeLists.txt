@@ -118,6 +118,7 @@ if(NOT TEST_USE_INSTALLED_VERSION)
             -DATLAS_CONSUMER_BINARY_DIR=${CMAKE_BINARY_DIR}/package-contract/installed-consumer
             -DATLAS_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}
             -DATLAS_GENERATOR=${CMAKE_GENERATOR}
+            "-DATLAS_PARENT_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
             -DATLAS_PACKAGE_STAGE=${CMAKE_BINARY_DIR}/package-contract/installed-stage
             -DATLAS_SOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}/..
             -P ${CMAKE_CURRENT_LIST_DIR}/cmake/run_installed_consumer.cmake
