@@ -17,6 +17,23 @@ jobs:
   build:
     runs-on: ubuntu-24.04
 
+    # Without a server every async integration suite runs zero tests, so the
+    # layer that talks to PostgreSQL would go entirely unexercised in CI.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas
+          POSTGRES_DB: atlas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +45,10 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-14 g++-14 
+          sudo apt-get install -y ca-certificates postgresql-common gcc-14 g++-14
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y libboost-all-dev libpq-dev pkg-config
+          pkg-config --atleast-version=18 libpq
 
       - name: Configure
         run: |
@@ -46,6 +65,8 @@ jobs:
         run: cmake --build build --config $BUILD_TYPE -j$(nproc)
 
       - name: Test
+        env:
+          ATLAS_TEST_CONNINFO: "host=127.0.0.1 port=5432 user=atlas password=atlas dbname=atlas_test"
         run: ctest --test-dir build -C $BUILD_TYPE --output-on-failure
 
       - name: Install

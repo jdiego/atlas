@@ -11,46 +11,34 @@
 namespace atlas::pg {
 
 struct result::impl {
-    explicit impl(detail::result_handle result_handle) noexcept
-        : handle(std::move(result_handle)) {
+    explicit impl(detail::result_handle result_handle) noexcept : handle(std::move(result_handle)) {
     }
 
-    detail::result_handle handle {};
+    detail::result_handle handle{};
 };
 
 namespace {
 
 [[nodiscard]] auto make_error(std::string message, errc code = errc::unknown) -> error {
-    return error {
-        .message = std::move(message),
-        .sqlstate = {},
-        .code = code,
-    };
+    return error{std::move(message), code};
 }
 
 [[nodiscard]] auto make_empty_result_error() -> error {
     return make_error("result handle is empty", errc::invalid_state);
 }
 
-[[nodiscard]] auto make_out_of_range_error(
-    std::string_view label,
-    std::size_t index,
-    std::size_t bound) -> error {
-    return make_error(
-        std::string(label) + " index " + std::to_string(index) +
-        " is out of range for bound " + std::to_string(bound),
-        errc::invalid_argument);
+[[nodiscard]] auto make_out_of_range_error(std::string_view label, std::size_t index, std::size_t bound) -> error {
+    return make_error(std::string(label) + " index " + std::to_string(index) + " is out of range for bound " +
+                          std::to_string(bound),
+                      errc::invalid_argument);
 }
 
 [[nodiscard]] auto make_too_large_error(std::string_view label, std::size_t index) -> error {
-    return make_error(
-        std::string(label) + " index " + std::to_string(index) +
-        " exceeds libpq integer limits",
-        errc::invalid_argument);
+    return make_error(std::string(label) + " index " + std::to_string(index) + " exceeds libpq integer limits",
+                      errc::invalid_argument);
 }
 
-[[nodiscard]] auto to_libpq_index(std::size_t index, std::string_view label)
-    -> std::expected<int, error> {
+[[nodiscard]] auto to_libpq_index(std::size_t index, std::string_view label) -> std::expected<int, error> {
     constexpr auto max_int = static_cast<std::size_t>(std::numeric_limits<int>::max());
     if (index > max_int) {
         return std::unexpected(make_too_large_error(label, index));
@@ -80,6 +68,8 @@ namespace {
         return result_status::copy_both;
     case PGRES_SINGLE_TUPLE:
         return result_status::single_tuple;
+    // The build requires libpq >= 18, so the pipeline and chunk statuses are
+    // always available.
     case PGRES_PIPELINE_SYNC:
         return result_status::pipeline_sync;
     case PGRES_PIPELINE_ABORTED:
@@ -98,8 +88,7 @@ result::~result() = default;
 result::result(result &&) noexcept = default;
 auto result::operator=(result &&) noexcept -> result & = default;
 
-result::result(std::unique_ptr<impl> impl) noexcept
-    : impl_(std::move(impl)) {
+result::result(std::unique_ptr<impl> impl) noexcept : impl_(std::move(impl)) {
 }
 
 auto result::empty() const noexcept -> bool {
@@ -180,8 +169,7 @@ auto result::is_null(std::size_t row, std::size_t col) const -> std::expected<bo
     return PQgetisnull(impl_->handle.get(), *row_index, *column_index) != 0;
 }
 
-auto result::field(std::size_t row, std::size_t col) const
-    -> std::expected<std::optional<std::string_view>, error> {
+auto result::field(std::size_t row, std::size_t col) const -> std::expected<std::optional<std::string_view>, error> {
     const auto checked_cell = validate_cell(row, col);
     if (!checked_cell) {
         return std::unexpected(std::move(checked_cell.error()));
@@ -198,16 +186,15 @@ auto result::field(std::size_t row, std::size_t col) const
     }
 
     if (PQgetisnull(impl_->handle.get(), *row_index, *column_index) != 0) {
-        return std::optional<std::string_view> {};
+        return std::optional<std::string_view>{};
     }
 
     const auto *value = PQgetvalue(impl_->handle.get(), *row_index, *column_index);
     const auto length = static_cast<std::size_t>(PQgetlength(impl_->handle.get(), *row_index, *column_index));
-    return std::optional<std::string_view> {std::string_view {value, length}};
+    return std::optional<std::string_view>{std::string_view{value, length}};
 }
 
-auto result::get(std::size_t row, std::size_t col) const
-    -> std::expected<std::optional<std::string_view>, error> {
+auto result::get(std::size_t row, std::size_t col) const -> std::expected<std::optional<std::string_view>, error> {
     return field(row, col);
 }
 
@@ -228,7 +215,15 @@ auto result::error_message() const noexcept -> std::string_view {
         return {};
     }
 
-    return std::string_view {message};
+    return std::string_view{message};
+}
+
+auto result::command_tag() const noexcept -> std::string_view {
+    if (impl_ == nullptr || impl_->handle == nullptr) {
+        return {};
+    }
+    const char *tag = PQcmdStatus(impl_->handle.get());
+    return tag == nullptr ? std::string_view{} : std::string_view{tag};
 }
 
 auto result::column_type(std::size_t col) const -> std::expected<oid, error> {
@@ -246,7 +241,7 @@ auto result::column_type(std::size_t col) const -> std::expected<oid, error> {
 }
 
 auto detail::result_handle_adopter::make(result_handle handle) -> result {
-    return result {std::make_unique<result::impl>(std::move(handle))};
+    return result{std::make_unique<result::impl>(std::move(handle))};
 }
 
 } // namespace atlas::pg

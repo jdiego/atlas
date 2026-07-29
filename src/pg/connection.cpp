@@ -29,11 +29,7 @@ struct prepared_params {
 }
 
 [[nodiscard]] auto make_error(std::string message, errc code = errc::unknown, std::string sqlstate = {}) -> error {
-    return error{
-        .message = trim_message(std::move(message)),
-        .sqlstate = std::move(sqlstate),
-        .code = code,
-    };
+    return error{trim_message(std::move(message)), std::move(sqlstate), code};
 }
 
 [[nodiscard]] auto make_handle_error(std::string_view label) -> error {
@@ -137,6 +133,8 @@ struct prepared_params {
     case PGRES_COPY_IN:
     case PGRES_COPY_BOTH:
     case PGRES_SINGLE_TUPLE:
+    // The build requires libpq >= 18, so the pipeline and chunk statuses are
+    // always available.
     case PGRES_PIPELINE_SYNC:
     case PGRES_PIPELINE_ABORTED:
     case PGRES_TUPLES_CHUNK:
@@ -188,8 +186,7 @@ struct prepared_params {
 } // namespace
 
 struct connection::impl {
-    explicit impl(detail::connection_handle connection_handle) noexcept
-        : handle(std::move(connection_handle)) {
+    explicit impl(detail::connection_handle connection_handle) noexcept : handle(std::move(connection_handle)) {
     }
 
     [[nodiscard]] auto ensure_handle() const -> std::expected<PGconn *, error> {
@@ -243,7 +240,7 @@ struct connection::impl {
         return std::unexpected(make_result_error(result_handle.get()));
     }
 
-    detail::connection_handle handle {};
+    detail::connection_handle handle{};
 };
 
 connection::connection() noexcept = default;
@@ -251,8 +248,7 @@ connection::~connection() = default;
 connection::connection(connection &&) noexcept = default;
 auto connection::operator=(connection &&) noexcept -> connection & = default;
 
-connection::connection(std::unique_ptr<impl> impl) noexcept
-    : impl_(std::move(impl)) {
+connection::connection(std::unique_ptr<impl> impl) noexcept : impl_(std::move(impl)) {
 }
 
 auto connection::connect(std::string_view conninfo) -> std::expected<connection, error> {
@@ -407,8 +403,7 @@ auto connection::send_query(std::string_view sql) -> std::expected<void, error> 
     return {};
 }
 
-auto connection::send_query_params(std::string_view sql, text_parameters params)
-    -> std::expected<void, error> {
+auto connection::send_query_params(std::string_view sql, text_parameters params) -> std::expected<void, error> {
     if (impl_ == nullptr) {
         return std::unexpected(make_handle_error("connection"));
     }
@@ -568,22 +563,22 @@ auto connection::poll_reset() -> std::expected<poll_state, error> {
     }
 
     switch (PQresetPoll(*handle)) {
-        case PGRES_POLLING_READING:
-            return poll_state::reading;
-        case PGRES_POLLING_WRITING:
-            return poll_state::writing;
-        case PGRES_POLLING_ACTIVE:
-            return poll_state::active;
-        case PGRES_POLLING_OK: {
-            auto nonblocking = impl_->ensure_nonblocking();
-            if (!nonblocking) {
-                return std::unexpected(std::move(nonblocking.error()));
-            }
-            return poll_state::ready;
+    case PGRES_POLLING_READING:
+        return poll_state::reading;
+    case PGRES_POLLING_WRITING:
+        return poll_state::writing;
+    case PGRES_POLLING_ACTIVE:
+        return poll_state::active;
+    case PGRES_POLLING_OK: {
+        auto nonblocking = impl_->ensure_nonblocking();
+        if (!nonblocking) {
+            return std::unexpected(std::move(nonblocking.error()));
         }
-        case PGRES_POLLING_FAILED:
-            return std::unexpected(make_connection_error(*handle));
-        }
+        return poll_state::ready;
+    }
+    case PGRES_POLLING_FAILED:
+        return std::unexpected(make_connection_error(*handle));
+    }
 
     return std::unexpected(make_connection_error(*handle, "libpq returned an unknown reset state"));
 }

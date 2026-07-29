@@ -1,0 +1,10 @@
+prefix=/nonexistent/atlas-fake-libpq
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libpq
+Description: Deliberately old libpq for Atlas package rejection coverage
+Version: 17.9
+Libs: -L${libdir} -lpq
+Cflags: -I${includedir}

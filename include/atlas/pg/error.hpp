@@ -2,7 +2,7 @@
 
 #include <string>
 #include <string_view>
-
+#include <utility>
 namespace atlas::pg {
 
 enum class errc {
@@ -18,6 +18,7 @@ enum class errc {
     query_canceled,
     undefined_table,
     syntax_error,
+    transaction_aborted,
 };
 
 [[nodiscard]] inline auto sqlstate_to_errc(std::string_view sqlstate) noexcept -> errc {
@@ -39,23 +40,37 @@ enum class errc {
     if (sqlstate == "57014") {
         return errc::query_canceled;
     }
+    if (sqlstate == "57P01") {
+        return errc::connection_failure;
+    }
     if (sqlstate == "42P01") {
         return errc::undefined_table;
     }
     if (sqlstate == "42601") {
         return errc::syntax_error;
     }
+    if (sqlstate == "25P02") {
+        return errc::transaction_aborted;
+    }
     return errc::unknown;
 }
 
 struct error {
-    std::string message {};
-    std::string sqlstate {};
-    errc code {errc::unknown};
+    std::string message{};
+    std::string sqlstate{};
+    errc code{errc::unknown};
+
+    error() = default;
+
+    error(std::string msg, errc erro_code) : message(std::move(msg)), code(erro_code) {
+    }
+
+    error(std::string msg, std::string state, errc erro_code)
+        : message(std::move(msg)), sqlstate(std::move(state)), code(erro_code) {
+    }
 
     [[nodiscard]] auto is_retryable() const noexcept -> bool {
-        return code == errc::connection_failure ||
-               code == errc::serialization_failure ||
+        return code == errc::connection_failure || code == errc::serialization_failure ||
                code == errc::deadlock_detected;
     }
 };

@@ -172,6 +172,14 @@ ut::suite<"connection/unit/validation"> validation_suite = [] {
     };
 };
 
+ut::suite<"connection/unit/error_mapping"> error_mapping_suite = [] {
+    using namespace ut;
+
+    "25P02 maps to transaction_aborted"_test = [] {
+        expect(sqlstate_to_errc("25P02") == errc::transaction_aborted);
+    };
+};
+
 ut::suite<"connection/unit/move_semantics"> move_suite = [] {
     using namespace ut;
 
@@ -255,6 +263,17 @@ ut::suite<"connection/integration/connect"> connect_suite = [] {
 
 ut::suite<"connection/integration/exec"> exec_suite = [] {
     using namespace ut;
+
+    "command_tag exposes PostgreSQL's terminal command"_test = [] {
+        auto ci = test_conninfo();
+        if (!ci) return;
+
+        auto conn = connection::connect(*ci);
+        expect(conn.has_value() >> fatal);
+        auto result = conn->exec("BEGIN");
+        expect(result.has_value() >> fatal);
+        expect(result->command_tag() == "BEGIN"sv);
+    };
 
     "exec SELECT 1 returns one row with correct value"_test = [] {
         auto ci = test_conninfo();

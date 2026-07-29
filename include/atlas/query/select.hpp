@@ -24,14 +24,15 @@
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
-#include <utility>
 
 #include "atlas/detail/type_utils.hpp"
 #include "atlas/query/expr.hpp"
 #include "atlas/query/join.hpp"
 #include "atlas/query/predicate.hpp"
+#include "atlas/query/source.hpp"
 #include "atlas/query/sql_serialize.hpp"
 #include "atlas/schema/storage.hpp"
 
@@ -64,34 +65,33 @@ constexpr auto tagged_column_ref(T Entity::*ptr) -> atlas::column_ref<Entity, T,
 // all_columns marker
 // ---------------------------------------------------------------------------
 
-template<typename Source>
+template <typename Source>
 struct all_columns_t {
     using source_type = detail::canonical_source_t<Source>;
     using entity_type = detail::source_entity_t<source_type>;
     using tag_type = detail::source_tag_t<source_type>;
 };
 
-template<typename T>
+template <typename T>
 struct is_all_columns : std::false_type {};
 
-template<typename Source>
+template <typename Source>
 struct is_all_columns<all_columns_t<Source>> : std::true_type {};
 
-template<typename T>
+template <typename T>
 inline constexpr bool is_all_columns_v = is_all_columns<T>::value;
 
 // ---------------------------------------------------------------------------
 // select_query_impl — full template state
 // ---------------------------------------------------------------------------
 
-template <
-    typename Selected,                      // std::tuple<column_ref<...>|agg, ...>
-    typename FromEntity = std::monostate,   // entity type supplied by .from<E>()
-    typename WherePred = std::monostate,    // predicate node or std::monostate
-    typename OrderBy = std::tuple<>,        // std::tuple<order_by_clause<...>, ...>
-    typename Joins = std::tuple<>,          // std::tuple<join_clause<...>, ...>
-    typename FromTag = void                 // tag for self-join on FROM entity
->
+template <typename Selected,                    // std::tuple<column_ref<...>|agg, ...>
+          typename FromEntity = std::monostate, // entity type supplied by .from<E>()
+          typename WherePred = std::monostate,  // predicate node or std::monostate
+          typename OrderBy = std::tuple<>,      // std::tuple<order_by_clause<...>, ...>
+          typename Joins = std::tuple<>,        // std::tuple<join_clause<...>, ...>
+          typename FromTag = void               // tag for self-join on FROM entity
+          >
 struct select_query_impl {
 
     // Runtime state — stored by value.
@@ -106,51 +106,29 @@ struct select_query_impl {
     // rather than exposing tuple plumbing from detail::.
     using self_t = select_query_impl<Selected, FromEntity, WherePred, OrderBy, Joins, FromTag>;
 
-    template <
-        typename NewFromEntity = FromEntity,
-        typename NewWherePred = WherePred,
-        typename NewOrderBy = OrderBy,
-        typename NewJoins = Joins,
-        typename NewFromTag = FromTag
-    >
-    using rebind_t = select_query_impl<Selected, NewFromEntity, NewWherePred,  NewOrderBy, NewJoins, NewFromTag>;
+    template <typename NewFromEntity = FromEntity, typename NewWherePred = WherePred, typename NewOrderBy = OrderBy,
+              typename NewJoins = Joins, typename NewFromTag = FromTag>
+    using rebind_t = select_query_impl<Selected, NewFromEntity, NewWherePred, NewOrderBy, NewJoins, NewFromTag>;
 
     template <typename Source, typename Tag = void>
-    using with_from_t = rebind_t<
-        detail::source_entity_t<detail::qualify_source_t<Source, Tag>>,
-        WherePred,
-        OrderBy,
-        Joins,
-        detail::source_tag_t<detail::qualify_source_t<Source, Tag>>
-    >;
+    using with_from_t = rebind_t<detail::source_entity_t<detail::qualify_source_t<Source, Tag>>, WherePred, OrderBy,
+                                 Joins, detail::source_tag_t<detail::qualify_source_t<Source, Tag>>>;
 
     template <typename Predicate>
     using with_where_t = rebind_t<FromEntity, std::remove_cvref_t<Predicate>, OrderBy, Joins, FromTag>;
 
     template <typename Entity, typename T, typename Tag = void>
-    using with_order_by_t = rebind_t<
-        FromEntity,
-        WherePred,
-        detail::tuple_append_t<OrderBy, detail::order_by_clause<Entity, T, Tag>>,
-        Joins,
-        FromTag
-    >;
+    using with_order_by_t =
+        rebind_t<FromEntity, WherePred, detail::tuple_append_t<OrderBy, detail::order_by_clause<Entity, T, Tag>>, Joins,
+                 FromTag>;
 
     template <typename JoinClause>
-    using with_join_clause_t = rebind_t<
-        FromEntity,
-        WherePred,
-        OrderBy,
-        detail::tuple_append_t<Joins, JoinClause>,
-        FromTag
-    >;
+    using with_join_clause_t =
+        rebind_t<FromEntity, WherePred, OrderBy, detail::tuple_append_t<Joins, JoinClause>, FromTag>;
 
     template <typename RhsSource, typename OnPredicate, join_kind Kind, typename RhsTag = void>
-    using with_join_t = with_join_clause_t<join_clause<
-        detail::qualify_source_t<RhsSource, RhsTag>,
-        std::remove_cvref_t<OnPredicate>,
-        Kind
-    >>;
+    using with_join_t = with_join_clause_t<
+        join_clause<detail::qualify_source_t<RhsSource, RhsTag>, std::remove_cvref_t<OnPredicate>, Kind>>;
 
     template <typename RhsSource, typename OnPredicate, typename RhsTag = void>
     using inner_join_result_t = with_join_t<RhsSource, OnPredicate, join_kind::inner, RhsTag>;
@@ -195,21 +173,15 @@ struct select_query_impl {
          *   — is rejected at compile time by detail::qualify_source.
          *
          */
-        return {
-            std::move(selected),
-            std::move(where_pred),
-            std::move(order_cols),
-            std::move(joins),
-            limit_n, offset_n
-        };
+        return {std::move(selected), std::move(where_pred), std::move(order_cols), std::move(joins), limit_n, offset_n};
     }
 
     // -----------------------------------------------------------------------
     // .where(predicate)
     // -----------------------------------------------------------------------
-    template <typename Predicate> 
-    requires is_predicate<Predicate>
-    auto where(Predicate&& pred) && -> with_where_t<Predicate> {
+    template <typename Predicate>
+        requires is_predicate<Predicate>
+    auto where(Predicate &&pred) && -> with_where_t<Predicate> {
         /*
          * What this function does:
          *   Attaches a WHERE predicate to the query.  Replaces any previously
@@ -228,13 +200,12 @@ struct select_query_impl {
          *     to warn the developer if desired.
          *
          */
-        return {
-            std::move(selected), 
-            std::forward<Predicate>(pred),
-            std::move(order_cols), 
-            std::move(joins), 
-            limit_n, offset_n
-        };
+        return {std::move(selected),
+                std::forward<Predicate>(pred),
+                std::move(order_cols),
+                std::move(joins),
+                limit_n,
+                offset_n};
     }
 
     // -----------------------------------------------------------------------
@@ -260,34 +231,18 @@ struct select_query_impl {
          *   - The returned query has one more element in its OrderBy.
          *
          */
-        auto new_order = std::tuple_cat(
-            std::move(order_cols),
-            std::make_tuple(detail::order_by_clause<Entity, T>{col, ascending})
-        );
-        return {
-            std::move(selected), 
-            std::move(where_pred),
-            std::move(new_order), 
-            std::move(joins), 
-            limit_n, offset_n
-        };
+        auto new_order =
+            std::tuple_cat(std::move(order_cols), std::make_tuple(detail::order_by_clause<Entity, T>{col, ascending}));
+        return {std::move(selected), std::move(where_pred), std::move(new_order), std::move(joins), limit_n, offset_n};
     }
 
     // For tagged self-join columns, pass a column_ref produced by
     // col<table_instance<E,Tag>>(...) to the column_ref overload below.
     template <typename Entity, typename T, typename Tag>
     auto order_by(column_ref<Entity, T, Tag> col, bool ascending = true) && -> with_order_by_t<Entity, T, Tag> {
-        auto new_order = std::tuple_cat(
-            std::move(order_cols),
-            std::make_tuple(detail::order_by_clause<Entity, T, Tag>{col.ptr, ascending})
-        );
-        return {
-            std::move(selected),
-            std::move(where_pred),
-            std::move(new_order),
-            std::move(joins),
-            limit_n, offset_n
-        };
+        auto new_order = std::tuple_cat(std::move(order_cols),
+                                        std::make_tuple(detail::order_by_clause<Entity, T, Tag>{col.ptr, ascending}));
+        return {std::move(selected), std::move(where_pred), std::move(new_order), std::move(joins), limit_n, offset_n};
     }
 
     // -----------------------------------------------------------------------
@@ -325,8 +280,7 @@ struct select_query_impl {
     // .inner_join<RhsSource>(on_predicate)
     // -----------------------------------------------------------------------
     template <typename RhsSource, typename RhsTag = void, typename OnPredicate>
-    auto inner_join(OnPredicate &&on) && -> inner_join_result_t<RhsSource, OnPredicate, RhsTag>
-    {
+    auto inner_join(OnPredicate &&on) && -> inner_join_result_t<RhsSource, OnPredicate, RhsTag> {
         /*
          * What this function does:
          *   Appends an INNER JOIN clause for RhsEntity with the given ON
@@ -350,22 +304,10 @@ struct select_query_impl {
          *
          */
         using JoinSource = detail::qualify_source_t<RhsSource, RhsTag>;
-        using JoinT = join_clause<
-            JoinSource,
-            std::remove_cvref_t<OnPredicate>,
-            join_kind::inner
-        >;
-        auto new_join = std::tuple_cat(
-            std::move(joins),
-            std::make_tuple(JoinT{std::forward<OnPredicate>(on)})
-        );
+        using JoinT = join_clause<JoinSource, std::remove_cvref_t<OnPredicate>, join_kind::inner>;
+        auto new_join = std::tuple_cat(std::move(joins), std::make_tuple(JoinT{std::forward<OnPredicate>(on)}));
         return {
-            std::move(selected),
-            std::move(where_pred),
-            std::move(order_cols),
-            std::move(new_join),
-            limit_n, offset_n
-        };
+            std::move(selected), std::move(where_pred), std::move(order_cols), std::move(new_join), limit_n, offset_n};
     }
 
     // -----------------------------------------------------------------------
@@ -391,22 +333,10 @@ struct select_query_impl {
          * Source forms accepted: see .inner_join() above.
          */
         using JoinSource = detail::qualify_source_t<RhsSource, RhsTag>;
-        using JoinT = join_clause<
-            JoinSource,
-            std::remove_cvref_t<OnPredicate>,
-            join_kind::left
-        >;
-        auto new_join = std::tuple_cat(
-            std::move(joins),
-            std::make_tuple(JoinT{std::forward<OnPredicate>(on)})
-        );
+        using JoinT = join_clause<JoinSource, std::remove_cvref_t<OnPredicate>, join_kind::left>;
+        auto new_join = std::tuple_cat(std::move(joins), std::make_tuple(JoinT{std::forward<OnPredicate>(on)}));
         return {
-            std::move(selected),
-            std::move(where_pred),
-            std::move(order_cols),
-            std::move(new_join),
-            limit_n, offset_n
-        };
+            std::move(selected), std::move(where_pred), std::move(order_cols), std::move(new_join), limit_n, offset_n};
     }
 
     // -----------------------------------------------------------------------
@@ -418,7 +348,7 @@ struct select_query_impl {
          *
          * What this function does:
          *   Serialises the entire SELECT query to a parameterised SQL string.
-         *   Delegates to sql_serialize.hpp helpers. 
+         *   Delegates to sql_serialize.hpp helpers.
          *
          * Key types involved:
          *   - serialize_context: accumulates $N params (sql_serialize.hpp).
@@ -440,23 +370,18 @@ struct select_query_impl {
          *     std::monostate>) to skip the WHERE clause.
          */
         static_assert(!std::is_same_v<FromEntity, std::monostate>,
-            "to_sql function requires .from<Source>() before serialisation");
+                      "to_sql function requires .from<Source>() before serialisation");
 
         auto alias_for = []<typename Tag>(std::string_view table_name) -> std::string {
-            if constexpr (!std::is_void_v<Tag> && detail::has_alias<Tag>) 
-            {
+            if constexpr (!std::is_void_v<Tag> && detail::has_alias<Tag>) {
                 return std::string(Tag::alias);
-            } 
-            else 
-            {
-                return std::string{
-                    static_cast<char>(std::tolower(static_cast<unsigned char>(table_name.front())))
-                };
+            } else {
+                return std::string{static_cast<char>(std::tolower(static_cast<unsigned char>(table_name.front())))};
             }
         };
 
         static_assert(std::tuple_size_v<Selected> > 0,
-            "select_query::to_sql() requires at least one selected expression");
+                      "select_query::to_sql() requires at least one selected expression");
 
         serialize_context ctx{};
         std::string sql = "SELECT ";
@@ -476,34 +401,33 @@ struct select_query_impl {
             first_select = false;
         };
 
-        std::apply([&](const auto &...exprs) {
-            auto append_select = [&](const auto &expr) {
-                using Expr = std::remove_cvref_t<decltype(expr)>;
-                if constexpr (is_aggregate<Expr>) {
-                    emit_separator();
-                    sql += serialize_aggregate(expr, db);
-                }
-                else if constexpr (is_column_ref<Expr>) {
-                    emit_separator();
-                    sql += serialize_column_ref(expr, db);
-                }
-                else if constexpr (is_all_columns_v<Expr>) {
-                    using AllEntity = typename Expr::entity_type;
-                    using AllTag = typename Expr::tag_type;
-                    const auto& table = db.template get_table<AllEntity>();
-                    table.for_each_column([&](const auto& col) {
+        std::apply(
+            [&](const auto &...exprs) {
+                auto append_select = [&](const auto &expr) {
+                    using Expr = std::remove_cvref_t<decltype(expr)>;
+                    if constexpr (is_aggregate<Expr>) {
                         emit_separator();
-                        sql += serialize_column_ref(detail::tagged_column_ref<AllTag>(col.member_ptr), db);
-                    });
-                }
-                else {
-                    static_assert(detail::always_false<Expr>,
-                        "select_query::to_sql(): unsupported SELECT expression");
-                }
-            };
+                        sql += serialize_aggregate(expr, db);
+                    } else if constexpr (is_column_ref<Expr>) {
+                        emit_separator();
+                        sql += serialize_column_ref(expr, db);
+                    } else if constexpr (is_all_columns_v<Expr>) {
+                        using AllEntity = typename Expr::entity_type;
+                        using AllTag = typename Expr::tag_type;
+                        const auto &table = db.template get_table<AllEntity>();
+                        table.for_each_column([&](const auto &col) {
+                            emit_separator();
+                            sql += serialize_column_ref(detail::tagged_column_ref<AllTag>(col.member_ptr), db);
+                        });
+                    } else {
+                        static_assert(detail::always_false<Expr>,
+                                      "select_query::to_sql(): unsupported SELECT expression");
+                    }
+                };
 
-            (append_select(exprs), ...);
-        }, selected);
+                (append_select(exprs), ...);
+            },
+            selected);
         // Resolve the FROM table once; its metadata drives both the clause
         // itself and the default alias fallback used by column serialization.
         const auto &from_table = db.template get_table<FromEntity>();
@@ -515,39 +439,37 @@ struct select_query_impl {
         // Emit JOINs before WHERE so placeholders produced by ON predicates
         // occupy the leading slots in ctx, matching params() traversal order.
         if constexpr (std::tuple_size_v<Joins> > 0) {
-            std::apply([&](const auto &...join_nodes) {
-                auto append_join = [&](const auto &join_node) {
-                    using Join = std::remove_cvref_t<decltype(join_node)>;
-                    using JoinEntity = typename Join::rhs_entity_type;
-                    using JoinTag = typename Join::tag_type;
-                    const auto& join_table = db.template get_table<JoinEntity>();
+            std::apply(
+                [&](const auto &...join_nodes) {
+                    auto append_join = [&](const auto &join_node) {
+                        using Join = std::remove_cvref_t<decltype(join_node)>;
+                        using JoinEntity = typename Join::rhs_entity_type;
+                        using JoinTag = typename Join::tag_type;
+                        const auto &join_table = db.template get_table<JoinEntity>();
 
-                    sql += " ";
-                    if constexpr (Join::kind == join_kind::inner) {
-                        sql += "INNER JOIN ";
-                    } 
-                    else if constexpr (Join::kind == join_kind::left) {
-                        sql += "LEFT JOIN ";
-                    } 
-                    else if constexpr (Join::kind == join_kind::right) {
-                        sql += "RIGHT JOIN ";
-                    } 
-                    else if constexpr (Join::kind == join_kind::full) {
-                        sql += "FULL JOIN ";
-                    } 
-                    else {
-                        static_assert(detail::always_false<Join>, "select_query::to_sql(): unsupported join kind");
-                    }
+                        sql += " ";
+                        if constexpr (Join::kind == join_kind::inner) {
+                            sql += "INNER JOIN ";
+                        } else if constexpr (Join::kind == join_kind::left) {
+                            sql += "LEFT JOIN ";
+                        } else if constexpr (Join::kind == join_kind::right) {
+                            sql += "RIGHT JOIN ";
+                        } else if constexpr (Join::kind == join_kind::full) {
+                            sql += "FULL JOIN ";
+                        } else {
+                            static_assert(detail::always_false<Join>, "select_query::to_sql(): unsupported join kind");
+                        }
 
-                    sql += join_table.name;
-                    sql += " ";
-                    sql += alias_for.template operator()<JoinTag>(join_table.name);
-                    sql += " ON ";
-                    sql += serialize_predicate(join_node.on, db, ctx);
-                };
+                        sql += join_table.name;
+                        sql += " ";
+                        sql += alias_for.template operator()<JoinTag>(join_table.name);
+                        sql += " ON ";
+                        sql += serialize_predicate(join_node.on, db, ctx);
+                    };
 
-                (append_join(join_nodes), ...);
-            }, joins);
+                    (append_join(join_nodes), ...);
+                },
+                joins);
         }
         // WHERE reuses predicate serialization so SQL emission and parameter
         // collection stay coupled through the same ctx state.
@@ -558,26 +480,27 @@ struct select_query_impl {
 
         // ORDER BY stores raw member pointers; wrap each one in a temporary
         // column_ref so it can reuse the standard qualified-column serializer.
-        if constexpr (std::tuple_size_v<OrderBy> > 0) 
-        {
+        if constexpr (std::tuple_size_v<OrderBy> > 0) {
             sql += " ORDER BY ";
             bool first_order = true;
 
-            std::apply([&](const auto &...clauses) {
-                auto append_order = [&](const auto &clause) {
-                    using Clause = std::remove_cvref_t<decltype(clause)>;
-                    using OrderTag = typename Clause::tag_type;
-                    if (!first_order) {
-                        sql += ", ";
-                    }
+            std::apply(
+                [&](const auto &...clauses) {
+                    auto append_order = [&](const auto &clause) {
+                        using Clause = std::remove_cvref_t<decltype(clause)>;
+                        using OrderTag = typename Clause::tag_type;
+                        if (!first_order) {
+                            sql += ", ";
+                        }
 
-                    sql += serialize_column_ref(detail::tagged_column_ref<OrderTag>(clause.col), db);
-                    sql += (clause.ascending ? " ASC" : " DESC");
-                    first_order = false;
-                };
+                        sql += serialize_column_ref(detail::tagged_column_ref<OrderTag>(clause.col), db);
+                        sql += (clause.ascending ? " ASC" : " DESC");
+                        first_order = false;
+                    };
 
-                (append_order(clauses), ...);
-            }, order_cols);
+                    (append_order(clauses), ...);
+                },
+                order_cols);
         }
 
         // LIMIT and OFFSET shape the statement and therefore render inline
@@ -599,7 +522,7 @@ struct select_query_impl {
     // .params(db)
     // -----------------------------------------------------------------------
     template <typename... Tables>
-    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...>&) const {
+    [[nodiscard]] std::vector<std::string> params(const storage_t<Tables...> &) const {
         /*
          * Returns the ordered list of bound parameter values matching the
          * $1, $2, … placeholders emitted by to_sql(db).
@@ -610,13 +533,11 @@ struct select_query_impl {
          * Pitfalls:
          *   - If to_sql() and params() traverse the AST in different orders the
          *     parameter indices will be wrong. Share implementation.
-        */
+         */
         serialize_context ctx{};
-        std::apply([&](const auto &...join_nodes) {
-            (detail::collect_predicate_params(join_nodes.on, ctx), ...);
-        }, joins);
-        if constexpr (not std::is_same_v<WherePred, std::monostate>)
-        {
+        std::apply([&](const auto &...join_nodes) { (detail::collect_predicate_params(join_nodes.on, ctx), ...); },
+                   joins);
+        if constexpr (not std::is_same_v<WherePred, std::monostate>) {
             detail::collect_predicate_params(where_pred, ctx);
         }
         return std::move(ctx.params);
@@ -629,14 +550,8 @@ struct select_query_impl {
 // ---------------------------------------------------------------------------
 
 template <typename... Selected>
-using select_query = select_query_impl<
-    std::tuple<Selected...>, 
-    std::monostate, 
-    std::monostate, 
-    std::tuple<>, 
-    std::tuple<>, 
-    void
->;
+using select_query =
+    select_query_impl<std::tuple<Selected...>, std::monostate, std::monostate, std::tuple<>, std::tuple<>, void>;
 
 // ---------------------------------------------------------------------------
 // Internal: normalise select() arguments
@@ -651,7 +566,8 @@ constexpr auto normalize_select_col(T Entity::*ptr) -> atlas::column_ref<Entity,
 }
 
 // Already-wrapped type (aggregate node, column_ref): pass through.
-template <typename T> requires(!std::is_member_pointer_v<std::remove_cvref_t<T>>)
+template <typename T>
+    requires(!std::is_member_pointer_v<std::remove_cvref_t<T>>)
 constexpr auto normalize_select_col(T &&t) -> std::remove_cvref_t<T> {
     return std::forward<T>(t);
 }
@@ -662,12 +578,11 @@ constexpr auto normalize_select_col(T &&t) -> std::remove_cvref_t<T> {
 // Factory: atlas::select(args...)
 // ---------------------------------------------------------------------------
 
-template<typename T>
+template <typename T>
 using select_expr_t = decltype(detail::normalize_select_col(std::declval<T>()));
 
 template <typename... Args>
-constexpr auto select(Args &&...args) -> select_query<select_expr_t<Args&&>...> 
-{
+constexpr auto select(Args &&...args) -> select_query<select_expr_t<Args &&>...> {
     /*
      * What this function does:
      *   Creates an empty select_query with the given select expressions.
@@ -691,24 +606,21 @@ constexpr auto select(Args &&...args) -> select_query<select_expr_t<Args&&>...>
      * Pitfalls:
      *   - Do not call normalize_select_col twice; compute the tuple in one pass.
      */
-    static_assert(sizeof...(Args) > 0,
-        "atlas::select() requires at least one column or aggregate");
+    static_assert(sizeof...(Args) > 0, "atlas::select() requires at least one column or aggregate");
 
-    return {
-        std::make_tuple(detail::normalize_select_col(std::forward<Args>(args))...),
-        {},
-        {},
-        {},
-        std::nullopt,
-        std::nullopt
-    };
+    return {std::make_tuple(detail::normalize_select_col(std::forward<Args>(args))...),
+            {},
+            {},
+            {},
+            std::nullopt,
+            std::nullopt};
 }
 
 // ---------------------------------------------------------------------------
 // Factory: atlas::all<Entity>()
 // ---------------------------------------------------------------------------
 
-template<typename Source, typename Tag = void>
+template <typename Source, typename Tag = void>
 constexpr auto all() -> all_columns_t<detail::qualify_source_t<Source, Tag>> {
     /*
      * What this function does:
@@ -729,7 +641,7 @@ constexpr auto all() -> all_columns_t<detail::qualify_source_t<Source, Tag>> {
 // Factory: atlas::select_all<Entity>()
 // ---------------------------------------------------------------------------
 
-template<typename Source, typename Tag = void>
+template <typename Source, typename Tag = void>
 constexpr auto select_all() {
     /*
      * What this function does:
@@ -760,22 +672,9 @@ constexpr auto select_all() {
     using Entity = detail::source_entity_t<SourceT>;
     using SourceTag = detail::source_tag_t<SourceT>;
     using AllColumns = all_columns_t<SourceT>;
-    using query_t = select_query_impl<
-        std::tuple<AllColumns>,
-        Entity,
-        std::monostate,
-        std::tuple<>,
-        std::tuple<>,
-        SourceTag
-    >;
-    return query_t{
-        std::make_tuple(AllColumns{}),
-        {},
-        {},
-        {},
-        std::nullopt,
-        std::nullopt
-    };
+    using query_t =
+        select_query_impl<std::tuple<AllColumns>, Entity, std::monostate, std::tuple<>, std::tuple<>, SourceTag>;
+    return query_t{std::make_tuple(AllColumns{}), {}, {}, {}, std::nullopt, std::nullopt};
 }
 
 } // namespace atlas

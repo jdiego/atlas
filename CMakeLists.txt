@@ -153,10 +153,10 @@ if(NOT ATLAS_HAS_BOOST_ASIO_HPP)
 endif()
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBPQ REQUIRED IMPORTED_TARGET libpq)
+pkg_check_modules(ATLAS_LIBPQ REQUIRED IMPORTED_TARGET "libpq>=18")
 
-if(TARGET PkgConfig::LIBPQ AND NOT TARGET PostgreSQL::PostgreSQL)
-    add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::LIBPQ)
+if(NOT TARGET PostgreSQL::PostgreSQL)
+    add_library(PostgreSQL::PostgreSQL ALIAS PkgConfig::ATLAS_LIBPQ)
 endif()
 
 
@@ -243,6 +243,12 @@ else()
             ${CMAKE_CURRENT_BINARY_DIR}/${VERSION_HEADER_LOCATION}
     )
 
+    target_include_directories(
+        ${PROJECT_NAME_LOWERCASE}
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
     target_compile_options(
         ${PROJECT_NAME_LOWERCASE}
         PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->"
@@ -254,7 +260,7 @@ else()
         PUBLIC
             Boost::boost
         PRIVATE
-            PostgreSQL::PostgreSQL
+            PkgConfig::ATLAS_LIBPQ
             Threads::Threads
             spdlog::spdlog
     )
