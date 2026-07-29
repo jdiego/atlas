@@ -1216,6 +1216,15 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         atlas::pool db{ctx.get_executor(), config_for(*url, 1, 10ms)};
 
         const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            // The 10ms budget is meant to expire against a busy pool, not
+            // against the pool's first connect, which can outlast it on a
+            // loaded machine and time this first acquire out instead.
+            const bool opened = co_await atlas_test::wait_until([&db] { return db.available() == 1; }, 5s);
+            expect(opened >> fatal) << "the pool never opened its connection";
+            if (!opened) {
+                co_return false;
+            }
+
             auto held = co_await db.acquire();
             expect(held.has_value() >> fatal);
             if (!held) {
@@ -1286,6 +1295,17 @@ ut::suite<"async/pool/integration"> pool_integration_suite = [] {
         atlas::pool db{ctx.get_executor(), config_for(*url, 1, 10ms)};
 
         const bool ran = run_on(ctx, [&]() -> asio::awaitable<bool> {
+            // The 10ms budget below is meant to race the timer against a
+            // hand-off, not against the pool's first connect. Opening that
+            // connection can easily outlast 10ms on a loaded machine, so the
+            // very first acquire would time out before the boundary this test
+            // is about is ever reached.
+            const bool opened = co_await atlas_test::wait_until([&db] { return db.available() == 1; }, 5s);
+            expect(opened >> fatal) << "the pool never opened its connection";
+            if (!opened) {
+                co_return false;
+            }
+
             for (int iteration = 0; iteration < 100; ++iteration) {
                 auto acquired = co_await db.acquire();
                 expect(acquired.has_value() >> fatal);

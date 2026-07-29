@@ -4,13 +4,17 @@
 #include "async/detail/reconnect_backoff.hpp"
 #include "atlas/async/transaction.hpp"
 
+#include <boost/asio/cancellation_type.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/dispatch.hpp>
+#include <boost/asio/error.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/system/system_error.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -115,6 +119,17 @@ void pool_state::publish_counts() {
 // Takes the next connection, or suspends until one is released. Runs on the
 // strand, so the free list and waiter queue need no further synchronisation.
 asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquire_slot() {
+    // Asio's "throw operation_aborted at the next co_await once cancelled" rule
+    // covers this whole awaitable thread, co_spawn's own entry point included.
+    // Older Boost (1.83, the Ubuntu 24.04 default) has no guard there, so a
+    // cancelled acquire makes that entry point throw while it dispatches this
+    // coroutine's completion: the waiting caller is never resumed and the
+    // exception unwinds io_context::run() instead. Newer Boost disables the
+    // check around that dispatch itself; doing it here makes every supported
+    // Boost behave alike. The cancellation is not swallowed — the timer wait
+    // below reports it through `ec` and pool::acquire() rethrows it.
+    co_await asio::this_coro::throw_if_cancelled(false);
+
     if (!connstr) {
         co_return std::unexpected(connstr.error());
     }
@@ -151,10 +166,11 @@ asio::awaitable<std::expected<async_connection *, pg::error>> pool_state::acquir
     try {
         co_await waiter->timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
     } catch (...) {
-        // Intrinsic coroutine cancellation can already be pending when Asio
-        // transforms this await, so initiation throws before the timer owns a
-        // handler. Remove only a ticket the queue still owns: hand-off and
-        // shutdown pop handled waiters before cancelling their timers.
+        // Cancellation arrives through `ec`, not as an exception, so nothing is
+        // expected here; this only keeps a ticket from outliving its coroutine
+        // if the await fails some other way. Remove only a ticket the queue
+        // still owns: hand-off and shutdown pop handled waiters before
+        // cancelling their timers.
         if (!waiter->handled) {
             waiters.erase(ticket);
         }
@@ -562,11 +578,27 @@ asio::awaitable<std::expected<pool_connection, pg::error>> pool::acquire() {
     // resumes *this* coroutine on its own executor, leaving the free list and
     // waiter queue unsynchronised on a multi-threaded io_context.
     auto slot = co_await asio::co_spawn(state->strand, state->acquire_slot(), asio::use_awaitable);
+
+    // Take ownership before reporting cancellation: a hand-off can land in the
+    // same strand tick the caller cancels in, and the lease destructor is what
+    // returns that connection to the pool as this frame unwinds.
+    std::optional<pool_connection> lease;
+    if (slot) {
+        lease.emplace(pool_connection{*slot, state});
+    }
+
+    // acquire_slot() turns Asio's automatic cancellation throw off for its own
+    // thread of execution, so a cancelled acquire has to be reported here, on
+    // the caller's frame, exactly as Asio would have reported it.
+    if ((co_await asio::this_coro::cancellation_state).cancelled() != asio::cancellation_type::none) {
+        throw boost::system::system_error{asio::error::operation_aborted, "co_await"};
+    }
+
     if (!slot) {
         co_return std::unexpected(slot.error());
     }
 
-    co_return pool_connection{*slot, std::move(state)};
+    co_return std::move(*lease);
 }
 
 asio::awaitable<std::expected<transaction, pg::error>> pool::begin() {
